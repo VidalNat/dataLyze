@@ -24,7 +24,7 @@ Open `http://localhost:8501` in your browser. That's it.
 
 ## Documentation
 
-Everything else lives in the **project Wiki(../../wiki)**:
+Everything else lives in the **[project Wiki](../../wiki)**:
 
 | Page | What's in it |
 |---|---|
