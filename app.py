@@ -1,6 +1,6 @@
 """
 DataLyze — Intelligent Data Analysis Platform
-v2.0.0 — Modular architecture
+v1.0.0 — Modular architecture
 
 ━━━ POSTGRESQL SWITCH GUIDE ━━━
 To use PostgreSQL instead of SQLite:
