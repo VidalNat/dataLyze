@@ -6,6 +6,7 @@ from modules.database import (
     get_user_sessions, get_session_charts,
     rename_session_db, delete_session_db,
 )
+from modules.ui.css import inject_footer
 
 
 def page_home():
@@ -34,27 +35,38 @@ def page_home():
 
     st.markdown(f"""
     <div class="welcome-banner">
-        <div style="font-size:0.8rem;opacity:0.8;margin-bottom:0.4rem;">DASHBOARD OVERVIEW</div>
-        <div style="font-size:2.2rem;font-weight:800;font-family:'Sora';margin-bottom:0.5rem;">
-            Welcome to Datalyze !!
+        <div style="font-size:0.75rem;opacity:0.75;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.4rem;">
+            DASHBOARD OVERVIEW
         </div>
-        <div style="font-size:1rem;opacity:0.9;">
-            Hello, {st.session_state.username}! Your data intelligence workspace is ready.
+        <div style="font-size:2.1rem;font-weight:800;font-family:'Sora',sans-serif;margin-bottom:0.4rem;letter-spacing:-0.03em;">
+            Welcome back, {st.session_state.username} 👋
+        </div>
+        <div style="font-size:0.95rem;opacity:0.88;line-height:1.6;">
+            Your data intelligence workspace is ready. Upload a dataset or pick up where you left off.
         </div>
     </div>""", unsafe_allow_html=True)
 
     sessions = get_user_sessions(st.session_state.user_id)
     m1, m2, m3 = st.columns(3)
     with m1:
-        st.markdown(f'<div class="metric-card"><div class="metric-val">{len(sessions)}</div>'
-                    f'<div class="metric-lbl">Analysis Sessions</div></div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="kpi-card"><div class="kpi-icon">📁</div>'
+            f'<div class="kpi-val">{len(sessions)}</div>'
+            f'<div class="kpi-lbl">Saved Sessions</div></div>',
+            unsafe_allow_html=True)
     with m2:
         unique_files = len(set(s[2] for s in sessions)) if sessions else 0
-        st.markdown(f'<div class="metric-card"><div class="metric-val">{unique_files}</div>'
-                    f'<div class="metric-lbl">Datasets</div></div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="kpi-card"><div class="kpi-icon">🗂️</div>'
+            f'<div class="kpi-val">{unique_files}</div>'
+            f'<div class="kpi-lbl">Datasets Analysed</div></div>',
+            unsafe_allow_html=True)
     with m3:
-        st.markdown('<div class="metric-card"><div class="metric-val">9</div>'
-                    '<div class="metric-lbl">Analysis Types</div></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="kpi-card"><div class="kpi-icon">🔬</div>'
+            '<div class="kpi-val">9</div>'
+            '<div class="kpi-lbl">Analysis Types</div></div>',
+            unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚀 Start New Analysis", use_container_width=True):
@@ -83,17 +95,21 @@ def page_home():
                     st.session_state.page = "dashboard"; st.rerun()
             with sc:
                 st.markdown("<br>", unsafe_allow_html=True)
+                # ── FIX: Edit → analysis page (not dashboard).
+                # Dashboard was showing PDF spinner immediately in edit mode.
                 if st.button("✏️ Edit", key=f"edit_btn_{sid}"):
                     saved = get_session_charts(sid)
                     st.session_state.charts = [(uid, title, fig) for uid, title, fig, desc in saved]
                     for uid, title, fig, desc in saved:
                         st.session_state[f"desc_{uid}"] = desc
-                    st.session_state.selected_analyses      = []
-                    st.session_state.editing_session_id     = sid
-                    st.session_state.editing_session_name   = sname
+                    st.session_state.selected_analyses    = []
+                    st.session_state.editing_session_id   = sid
+                    st.session_state.editing_session_name = sname
+                    st.session_state.editing_file_name    = fname
                     st.session_state.setdefault("file_name", fname)
                     log_activity(st.session_state.user_id, "session_edit_started", f"session_id={sid}", sid)
-                    st.session_state.page = "dashboard"; st.rerun()
+                    # Go to analysis — not dashboard — so user can add/change charts first.
+                    st.session_state.page = "analysis"; st.rerun()
             with sd:
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("🔤", key=f"rename_btn_{sid}", help="Rename this session"):
@@ -129,3 +145,5 @@ def page_home():
                 with d2:
                     if st.button("Cancel", key=f"confirm_no_{sid}"):
                         st.session_state.pop(f"confirm_del_{sid}", None); st.rerun()
+
+    inject_footer()

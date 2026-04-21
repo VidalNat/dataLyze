@@ -4,6 +4,7 @@ import streamlit as st
 import pandas as pd
 from modules.ui.column_manager import show_column_manager
 from modules.ui.column_tools import show_dtype_transformer, show_column_classifier
+from modules.ui.css import inject_footer
 
 
 def page_upload():
@@ -23,7 +24,7 @@ def page_upload():
         else:
             df = st.session_state.df
 
-        st.success(f"✅ Loaded {uploaded.name} ({df.shape[0]} rows)")
+        st.success(f"✅ Loaded {uploaded.name} ({df.shape[0]:,} rows × {df.shape[1]} columns)")
         st.dataframe(df.head(), use_container_width=True)
 
         df = show_column_manager(df)
@@ -44,3 +45,5 @@ def page_upload():
             if st.button("💾 Save Column Descriptions", key="save_col_descs"):
                 st.session_state.col_descriptions = col_descs
                 st.success("✅ Column descriptions saved — they'll appear in chart insights.")
+
+    inject_footer()

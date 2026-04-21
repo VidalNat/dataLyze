@@ -1,13 +1,15 @@
 """
-modules/pages/analysis.py — Main analysis selection & chart generation page.
+modules/pages/analysis.py — Analysis selection & chart generation page.
 
-KEY ARCHITECTURE NOTE:
-  data_quality uses st.button() widgets internally, so it CANNOT be called
-  inside st.form(). It is handled in a separate code path outside the form.
-  Any future analysis module that uses st.button/st.selectbox interactively
-  should be added to _NO_FORM in modules/analysis/__init__.py.
+Edit-mode fix:
+  When a user clicks Edit on a saved session from home, they land here
+  with editing_session_id set but df possibly None (no file re-uploaded).
+  We show a clear banner explaining the situation with two options:
+    1. Upload the dataset again to add more charts
+    2. Go straight to the dashboard to update the session name/save
 """
 
+import uuid
 import streamlit as st
 from modules.database import validate_token, log_activity
 from modules.analysis import (
@@ -18,7 +20,7 @@ from modules.analysis.runners import run_descriptive
 from modules.analysis.data_quality import run_data_quality
 from modules.analysis.outlier import OUTLIER_HELP
 from modules.charts import generate_chart_insights
-import uuid
+from modules.ui.css import inject_footer
 
 
 def page_analysis():
@@ -32,40 +34,100 @@ def page_analysis():
             st.rerun()
 
     df = st.session_state.get("df")
+    is_editing = "editing_session_id" in st.session_state
+
+    # ── Edit mode with no df loaded ───────────────────────────────────────────
+    if df is None and is_editing:
+        sname = st.session_state.get("editing_session_name", "Session")
+        fname = st.session_state.get("editing_file_name", "the original file")
+        charts = st.session_state.get("charts", [])
+
+        a, _ = st.columns([1, 10])
+        with a:
+            if st.button("← Home"):
+                st.session_state.pop("editing_session_id", None)
+                st.session_state.pop("editing_session_name", None)
+                st.session_state.pop("editing_file_name", None)
+                st.session_state.page = "home"; st.rerun()
+
+        st.markdown(f"## ✏️ Editing: {sname}")
+        st.markdown(
+            f'<div class="edit-banner">'
+            f'<b>📂 Re-upload needed to add more charts</b><br>'
+            f'<span style="font-size:0.88rem;opacity:0.85;">'
+            f'You are editing a saved session. To run new analyses, '
+            f're-upload <b>{fname}</b> on the Upload page. '
+            f'Or go directly to the Dashboard to rename or update what you already have.'
+            f'</span></div>',
+            unsafe_allow_html=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("📂 Upload Dataset to Add Charts", use_container_width=True):
+                st.session_state.page = "upload"; st.rerun()
+        with c2:
+            if st.button("📊 Go to Dashboard →", use_container_width=True):
+                st.session_state.page = "dashboard"; st.rerun()
+
+        # Show existing charts in edit mode
+        if charts:
+            st.markdown("---")
+            st.markdown(f"### 📈 Current Charts ({len(charts)})")
+            for uid, title, fig in charts:
+                st.markdown(f"#### {title}")
+                st.plotly_chart(fig, use_container_width=True)
+                st.text_area(
+                    "✍️ Chart Notes",
+                    value=st.session_state.get(f"desc_{uid}", ""),
+                    key=f"desc_{uid}")
+        inject_footer()
+        return
+
+    # ── No df and not editing — redirect to upload ────────────────────────────
     if df is None:
         st.session_state.page = "upload"; st.rerun()
 
-    if "charts"             not in st.session_state: st.session_state.charts             = []
-    if "selected_analyses"  not in st.session_state: st.session_state.selected_analyses  = []
+    if "charts"            not in st.session_state: st.session_state.charts            = []
+    if "selected_analyses" not in st.session_state: st.session_state.selected_analyses = []
 
     a, b = st.columns([1, 10])
     with a:
         if st.button("← Home"):
             st.session_state.page = "home"; st.rerun()
 
+    # Edit mode banner when df is loaded
+    if is_editing:
+        sname = st.session_state.get("editing_session_name", "Session")
+        st.markdown(
+            f'<div class="edit-banner">'
+            f'✏️ <b>Edit mode</b> — you are adding charts to <b>{sname}</b>. '
+            f'When done, click <b>Proceed to Dashboard</b> below to save your changes.'
+            f'</div>',
+            unsafe_allow_html=True)
+
     st.markdown("## 🔬 Select Analysis Type")
-    done   = set(st.session_state.selected_analyses)
     active = st.session_state.get("_active_analysis")
     cols   = st.columns(4)
 
     for i, opt in enumerate(ANALYSIS_OPTIONS):
         with cols[i % 4]:
-            border = ("border-color:#4f6ef7;box-shadow:0 0 0 3px rgba(79,110,247,0.15);"
+            border = ("border-color:#4f6ef7;box-shadow:0 0 0 3px rgba(79,110,247,0.18);"
                       if opt["id"] == active else "")
             st.markdown(
                 f'<div class="ag-card" style="{border}">'
-                f'<h4>{opt["icon"]} {opt["name"]}</h4>'
-                f'<small>{opt["desc"]}</small></div>',
+                f'<div class="ag-icon">{opt["icon"]}</div>'
+                f'<div class="ag-name">{opt["name"]}</div>'
+                f'<div class="ag-desc">{opt["desc"]}</div></div>',
                 unsafe_allow_html=True)
             if st.button("▶ Run", key=f"btn_{opt['id']}"):
                 st.session_state["_active_analysis"] = opt["id"]; st.rerun()
 
-    # ── Active analysis panel ──────────────────────────────────────────────────
+    # ── Active analysis panel ─────────────────────────────────────────────────
     if active:
         st.markdown("---")
         analysis_name = next(o["name"] for o in ANALYSIS_OPTIONS if o["id"] == active)
 
-        # ── data_quality: runs OUTSIDE st.form (contains st.button widgets) ───
+        # data_quality runs OUTSIDE st.form (it uses st.button internally)
         if active in _NO_FORM:
             st.markdown(f"### {analysis_name}")
             df_current = st.session_state.get("df", df)
@@ -89,7 +151,6 @@ def page_analysis():
                 if st.button("✕ Close", key="dq_cancel"):
                     st.session_state["_active_analysis"] = None; st.rerun()
 
-        # ── All other analyses: safe to use st.form ───────────────────────────
         else:
             with st.form(key=f"config_form_{active}"):
                 st.markdown(f"### Configure {analysis_name}")
@@ -126,13 +187,13 @@ def page_analysis():
                 elif cancelled:
                     st.session_state["_active_analysis"] = None; st.rerun()
 
-    # ── Descriptive output ─────────────────────────────────────────────────────
+    # ── Descriptive output ────────────────────────────────────────────────────
     if "descriptive" in st.session_state.selected_analyses:
         st.markdown("---")
         st.markdown("### 🗂️ Descriptive Output")
         run_descriptive(df)
 
-    # ── Generated charts ───────────────────────────────────────────────────────
+    # ── Generated charts ──────────────────────────────────────────────────────
     if st.session_state.charts:
         st.markdown("---")
         h1, h2 = st.columns([5, 1])
@@ -156,7 +217,6 @@ def page_analysis():
                     st.rerun()
             st.plotly_chart(fig, use_container_width=True)
 
-            # Outlier help banner shown directly below outlier charts
             if "outlier" in title.lower() or "Outliers:" in title:
                 st.info(OUTLIER_HELP)
 
@@ -178,3 +238,5 @@ def page_analysis():
             log_activity(st.session_state.get("user_id", 0), "proceed_to_dashboard",
                          f"charts={len(st.session_state.charts)}")
             st.session_state.page = "dashboard"; st.rerun()
+
+    inject_footer()

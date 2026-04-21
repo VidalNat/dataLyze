@@ -2,6 +2,7 @@
 
 import streamlit as st
 from modules.database import login_user, register_user, validate_token, create_token, log_activity
+from modules.ui.css import inject_footer
 
 
 def page_auth():
@@ -23,8 +24,14 @@ def page_auth():
 
     _, col, _ = st.columns([1, 0.85, 1])
     with col:
-        st.markdown('<div style="text-align:center;padding-top:3rem;margin-bottom:2rem;">'
-                    '<div class="brand">📊 DataLyze</div></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div style="text-align:center;padding-top:3rem;margin-bottom:2rem;">'
+            '<div class="brand" style="font-size:2rem;">📊 DataLyze</div>'
+            '<div style="font-size:0.88rem;margin-top:0.5rem;opacity:0.65;">'
+            'Intelligent Data Analysis Platform</div>'
+            '</div>',
+            unsafe_allow_html=True)
+
         col_login, col_reg = st.columns(2)
         with col_login:
             if st.button("🔐 Login", use_container_width=True,
@@ -35,14 +42,13 @@ def page_auth():
                          type="primary" if not is_login else "secondary"):
                 st.session_state.auth_tab = "register"; st.rerun()
 
-        st.markdown('<div style="text-align:center;margin-top:1rem;font-size:1.1rem;opacity:0.8;">'
-                    'Welcome to DataLyze !!</div>', unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
 
         if is_login:
             username = st.text_input("Username", key="l_user")
             password = st.text_input("Password", type="password", key="l_pass")
-            remember = st.checkbox("Stay signed in (persist after refresh)", value=True, key="remember_me")
-            if st.button("Sign In →"):
+            remember = st.checkbox("Stay signed in", value=True, key="remember_me")
+            if st.button("Sign In →", use_container_width=True):
                 user = login_user(username, password)
                 if user:
                     st.session_state.user_id  = user[0]
@@ -56,14 +62,14 @@ def page_auth():
                         st.query_params.clear()
                     st.rerun()
                 else:
-                    st.error("Incorrect details.")
+                    st.error("Incorrect username or password.")
         else:
             ru  = st.text_input("Username", key="r_u")
             re  = st.text_input("Email",    key="r_e")
             rp  = st.text_input("Password", type="password", key="r_p")
             rp2 = st.text_input("Confirm Password", type="password", key="r_p2")
-            if st.button("Create Account →"):
-                if rp != rp2:        st.error("Passwords don't match.")
+            if st.button("Create Account →", use_container_width=True):
+                if rp != rp2:       st.error("Passwords don't match.")
                 elif len(rp) < 6:   st.error("Password must be 6+ characters.")
                 else:
                     ok, msg = register_user(ru, re, rp)
@@ -74,3 +80,5 @@ def page_auth():
                         st.rerun()
                     else:
                         st.error(msg)
+
+    inject_footer()
