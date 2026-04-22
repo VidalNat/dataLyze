@@ -6,6 +6,7 @@
 
 ![Login Screen](demo_pics/welcome_screen.png)
 
+<!-- 
 ![Profile_Dashboad](demo_pics/profile_dashboad.png)
 
 ![Upload & Overview](demo_pics/data_upload&overview.png)
@@ -13,7 +14,7 @@
 ![Data_Transformation](demo_pics/data_transformation.png)
 
 ![Analysis_Options](demo_pics/analysis_options.png)
-
+-->
 ![Final_dashboard](demo_pics/final_dashboard.png)
 
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python)
