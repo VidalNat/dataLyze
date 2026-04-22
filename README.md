@@ -39,7 +39,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Open `http://localhost:8501` in your browser. That's it.
+This `http://localhost:8501` will open in your default browser. That's it.
 
 ## Documentation
 
