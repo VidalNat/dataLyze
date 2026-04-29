@@ -59,7 +59,7 @@ def show_column_manager(df):
                         }
                         df[new_col_name.strip()] = mapping[part_to_extract]
                     else:
-                        df[new_col_name.strip()] = df.eval(formula_str.replace("`",""))
+                        df[new_col_name.strip()] = df.eval(formula_str)
                     st.session_state.df = df
                     st.success(f"✅ Added {new_col_name.strip()}")
                     st.rerun()

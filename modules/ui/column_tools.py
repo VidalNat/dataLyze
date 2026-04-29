@@ -45,9 +45,37 @@ def show_dtype_transformer(df):
             elif new_dtype == "date":
                 converted = pd.to_datetime(df[col_to_convert], errors='coerce').dt.date
             elif new_dtype == "time":
-                converted = pd.to_datetime(df[col_to_convert], errors='coerce').dt.time
+                # Handle pure time strings like "07:06:11" which pd.to_datetime
+                # can't parse alone — prepend a dummy date.
+                def _to_time(val):
+                    if pd.isna(val) or val is None:
+                        return None
+                    if isinstance(val, datetime.time):
+                        return val
+                    s = str(val).strip()
+                    try:
+                        return pd.to_datetime("1970-01-01 " + s).time()
+                    except Exception:
+                        try:
+                            return pd.to_datetime(s).time()
+                        except Exception:
+                            return None
+                converted = df[col_to_convert].apply(_to_time)
             elif new_dtype == "timedelta64[ns]":
-                converted = pd.to_timedelta(df[col_to_convert], errors='coerce')
+                # pd.to_timedelta handles "HH:MM:SS" strings natively.
+                # If values are Python datetime.time objects, convert via str first.
+                def _to_td(val):
+                    if pd.isna(val) or val is None:
+                        return pd.NaT
+                    if isinstance(val, datetime.time):
+                        return pd.Timedelta(hours=val.hour, minutes=val.minute,
+                                            seconds=val.second,
+                                            microseconds=val.microsecond)
+                    try:
+                        return pd.to_timedelta(str(val))
+                    except Exception:
+                        return pd.NaT
+                converted = df[col_to_convert].apply(_to_td)
             elif new_dtype in ["string", "object"]:
                 converted = df[col_to_convert].astype(str)
             elif new_dtype == "category":
@@ -105,6 +133,8 @@ def show_column_classifier(df):
             st.session_state.cat_cols = confirmed_cat
             st.session_state.dt_cols  = confirmed_dt
             st.session_state.page     = "analysis"
-            st.session_state.charts   = []
-            st.session_state.selected_analyses = []
+            # Only reset charts when NOT in edit mode — preserve saved charts
+            if "editing_session_id" not in st.session_state:
+                st.session_state.charts   = []
+                st.session_state.selected_analyses = []
             st.rerun()

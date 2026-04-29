@@ -1,12 +1,16 @@
-"""modules/pages/home.py — Home dashboard page."""
+"""
+modules/pages/home.py — Home dashboard page.
+Fixes: Lytrize logo at top with home link (#10)
+"""
 
 import streamlit as st
+from html import escape
 from modules.database import (
     validate_token, revoke_token, log_activity,
     get_user_sessions, get_session_charts,
     rename_session_db, delete_session_db,
 )
-from modules.ui.css import inject_footer
+from modules.ui.css import inject_footer, render_logo
 
 
 def page_home():
@@ -19,10 +23,11 @@ def page_home():
             st.session_state.page     = "home"
             st.rerun()
 
-    c1, c2 = st.columns([14, 1])
-    with c1:
-        st.markdown('<div class="brand">📊 DataLyze</div>', unsafe_allow_html=True)
-    with c2:
+    # Logo + logout row
+    lc1, lc2 = st.columns([14, 1])
+    with lc1:
+        render_logo()
+    with lc2:
         if st.button("Logout"):
             tok = st.query_params.get("t", "")
             if tok: revoke_token(tok)
@@ -31,16 +36,17 @@ def page_home():
             st.session_state.clear()
             st.session_state.page = "auth"
             st.rerun()
+
     st.markdown("---")
 
+    username = escape(str(st.session_state.username))
     st.markdown(f"""
-                <!-- Make text aligned at centre & add pading to reduce excess width -->
-    <div class="welcome-banner" style="text-align: center; padding: 1.2rem 1.5rem;"> 
-        <div style="font-size:0.75rem;opacity:0.75;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.4rem;">
-            DASHBOARD OVERVIEW
-        </div>
-        <div style="font-size:2.1rem;font-weight:800;font-family:'Sora',sans-serif;margin-bottom:0.4rem;letter-spacing:-0.03em;">
-            Welcome back, {st.session_state.username} 👋
+    <div class="welcome-banner" style="text-align: center; padding: 1.2rem 1.5rem;">
+        <div style="font-size:0.75rem;opacity:0.75;font-weight:600;letter-spacing:0.1em;
+                    text-transform:uppercase;margin-bottom:0.4rem;">DASHBOARD OVERVIEW</div>
+        <div style="font-size:2.1rem;font-weight:800;font-family:'Sora',sans-serif;
+                    margin-bottom:0.4rem;letter-spacing:-0.03em;">
+            Welcome back, {username} 👋
         </div>
         <div style="font-size:0.95rem;opacity:0.88;line-height:1.6;">
             Your data intelligence workspace is ready. Upload a dataset or pick up where you left off.
@@ -66,12 +72,17 @@ def page_home():
         st.markdown(
             '<div class="kpi-card"><div class="kpi-icon">🔬</div>'
             '<div class="kpi-val">9</div>'
-            '<div class="kpi-lbl">Analysis Types</div></div>',
+            '<div class="kpi-lbl">Available analysis</div></div>',
             unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🚀 Start New Analysis", use_container_width=False):
         log_activity(st.session_state.user_id, "new_analysis_started")
+        # Clear any leftover draft / editing state for a fresh start
+        for k in ["editing_session_id", "editing_session_name", "editing_file_name",
+                  "df", "charts", "selected_analyses", "dashboard_title", "kpis",
+                  "layout_mode", "_view_charts", "view_session_id"]:
+            st.session_state.pop(k, None)
         st.session_state.page = "upload"; st.rerun()
 
     st.markdown('<div class="sec-label">📁 Previous Sessions</div>', unsafe_allow_html=True)
@@ -81,35 +92,49 @@ def page_home():
     else:
         for s in sessions[:8]:
             sid, sname, fname, rows, cols, atypes, created = s
+            safe_sname = escape(str(sname))
+            safe_fname = escape(str(fname or ""))
+            safe_created = escape(str(created or ""))
             sa, sb, sc, sd, se = st.columns([3, 1, 1, 1, 1])
             with sa:
                 st.markdown(
-                    f'<div class="sess-card"><b>{sname}</b><br>'
-                    f'<small>{fname} · {rows}×{cols} · {created[:16]}</small></div>',
+                    f'<div class="sess-card"><b>{safe_sname}</b><br>'
+                    f'<small>{safe_fname} · {rows}×{cols} · {safe_created[:16]}</small></div>',
                     unsafe_allow_html=True)
             with sb:
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("View", key=f"v_{sid}"):
                     st.session_state.view_session_id   = sid
                     st.session_state.view_session_name = sname
-                    log_activity(st.session_state.user_id, "session_viewed", f"session_id={sid}", sid)
+                    # Clear stale _view_charts so dashboard reloads fresh
+                    st.session_state.pop("_view_charts",            None)
+                    st.session_state.pop("_view_session_id_loaded", None)
+                    st.session_state.pop("dashboard_title",         None)
+                    st.session_state.pop("kpis",                    None)
+                    st.session_state.pop("layout_mode",             None)
+                    log_activity(st.session_state.user_id, "session_viewed",
+                                 f"session_id={sid}", sid)
                     st.session_state.page = "dashboard"; st.rerun()
             with sc:
                 st.markdown("<br>", unsafe_allow_html=True)
-                # ── FIX: Edit → analysis page (not dashboard).
-                # Dashboard was showing PDF spinner immediately in edit mode.
                 if st.button("✏️ Edit", key=f"edit_btn_{sid}"):
-                    saved = get_session_charts(sid)
-                    st.session_state.charts = [(uid, title, fig) for uid, title, fig, desc in saved]
-                    for uid, title, fig, desc in saved:
-                        st.session_state[f"desc_{uid}"] = desc
+                    saved = get_session_charts(sid, st.session_state.user_id)
+                    # saved is list of 7-tuples: (uid, title, fig, desc, auto, ctype, meta)
+                    st.session_state.charts = [(uid, title, fig) for uid, title, fig, *_ in saved]
+                    for uid, title, fig, desc, auto, ctype, meta in saved:
+                        st.session_state[f"desc_{uid}"]          = desc
+                        st.session_state[f"auto_insights_{uid}"] = auto
+                        st.session_state[f"chart_type_{uid}"]    = ctype
+                        st.session_state[f"chart_meta_{uid}"]    = meta
                     st.session_state.selected_analyses    = []
                     st.session_state.editing_session_id   = sid
                     st.session_state.editing_session_name = sname
                     st.session_state.editing_file_name    = fname
                     st.session_state.setdefault("file_name", fname)
-                    log_activity(st.session_state.user_id, "session_edit_started", f"session_id={sid}", sid)
-                    # Go to analysis — not dashboard — so user can add/change charts first.
+                    # Clear any old view state
+                    st.session_state.pop("view_session_id", None)
+                    log_activity(st.session_state.user_id, "session_edit_started",
+                                 f"session_id={sid}", sid)
                     st.session_state.page = "analysis"; st.rerun()
             with sd:
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -125,7 +150,7 @@ def page_home():
                 r1, r2 = st.columns(2)
                 with r1:
                     if st.button("✅ Save", key=f"save_rename_{sid}"):
-                        rename_session_db(sid, new_name)
+                        rename_session_db(sid, new_name, st.session_state.user_id)
                         log_activity(st.session_state.user_id, "session_renamed",
                                      f"id={sid} new='{new_name}'", sid)
                         st.session_state.pop(f"renaming_{sid}", None)

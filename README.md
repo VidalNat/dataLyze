@@ -1,10 +1,10 @@
-# 📊 DataLyze — Intelligent Data Analysis Platform
+# Lytrize — Intelligent Data Analysis Platform
 
-> ⚡ Fast, offline analytics for real-world datasets — no cloud, no complexit
+> ⚡ Fast, offline analytics for real-world datasets — no cloud, no complexity
 >
 > ## Demo Screenshots
-
-![Login Screen](demo_pics/welcome_screen.png)
+>
+> Demo screenshots are maintained in the project Wiki.
 
 <!-- 
 ![Profile_Dashboad](demo_pics/profile_dashboad.png)
@@ -15,8 +15,6 @@
 
 ![Analysis_Options](demo_pics/analysis_options.png)
 -->
-![Final_dashboard](demo_pics/final_dashboard.png)
-
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue?logo=python)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.30%2B-red?logo=streamlit)
 ![License](https://img.shields.io/badge/License-MIT-green)
@@ -24,12 +22,14 @@
 
 ---
 
-<b>DataLyze is an open-source, lightweight, offline-first data analysis tool designed for individual analysts.</b><br><br>Upload a CSV or Excel file, explore it through interactive charts and generate shareable dashboards - all locally, without complex setup or cloud dependency.
+<b>Lytrize is an open-source, lightweight, offline-first data analysis tool designed for individual analysts.</b><br><br>Upload a CSV or Excel file, explore it through interactive charts and generate shareable dashboards - all locally, without complex setup or cloud dependency.
 
 
 ## Quick Start
 
-Please check - [Getting Started](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki/Getting-started)
+Please check - [Getting Started](https://github.com/VidalNat/DataLyzze/wiki/Getting-started)
+
+Open `http://localhost:8501` in your browser. That's it.
 
 ## Documentation
 

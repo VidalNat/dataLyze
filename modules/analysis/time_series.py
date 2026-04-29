@@ -1,112 +1,141 @@
 """
 modules/analysis/time_series.py
-Time series line charts with optional date-part aggregation.
-Supports Year, Quarter, Month, Weekday, Day, Hour groupings.
+Time series — dual Y-axis, date-part grouping. Date range filter removed.
 """
 
 import pandas as pd
+import plotly.graph_objects as go
 import plotly.express as px
-from modules.charts import chart_layout, COLORS, num_cols as _num_cols
+from plotly.subplots import make_subplots
+from modules.charts import chart_layout, COLORS
 
-
-# Month and weekday ordering maps for categorical x-axis sorting
-_MONTH_ORDER   = {m: i for i, m in enumerate([
-    "January","February","March","April","May","June",
-    "July","August","September","October","November","December"])}
-_WEEKDAY_ORDER = {d: i for i, d in enumerate(
+_MONTH   = {m: i for i, m in enumerate(
+    ["January","February","March","April","May","June",
+     "July","August","September","October","November","December"])}
+_WEEKDAY = {d: i for i, d in enumerate(
     ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"])}
 
 
-def run_time_series(df, x_cols=None, y_cols=None, agg="mean", date_part=None, palette=None, **kwargs):
-    """
-    Args:
-        x_cols:     list with one date/time column (auto-detected if omitted)
-        y_cols:     list of numeric metric columns
-        agg:        aggregation string: 'mean', 'sum', 'median', 'count', 'min', 'max'
-        date_part:  pandas period alias or special string —
-                    'Y', 'Q', 'M', 'D', 'H', 'month_name', 'weekday_name', or None
-        palette:    list of hex colour strings
+def run_time_series(df, x_cols=None, y_cols=None, agg="mean", date_part=None,
+                    palette=None, dual_y_col=None, **_):
+    charts  = []
+    df      = df.copy()
+    dt_col  = (x_cols or [None])[0]
+    agg_lbl = agg.title()
+    pal     = palette or COLORS
 
-    Returns:
-        list of (title, fig) tuples
-    """
-    charts    = []
-    num       = y_cols or _num_cols()[:4]
-    df        = df.copy()
-    dt_col    = x_cols[0] if x_cols else None
-    agg_label = agg.title()
-    pal       = palette or COLORS
-
-    # ── Auto-detect a date column if none specified ───────────────────────────
+    # Auto-detect datetime column
     if not dt_col:
-        for col in df.columns:
+        for c in df.columns:
             try:
-                df[col] = pd.to_datetime(df[col], infer_datetime_format=True)
-                dt_col  = col
-                break
+                df[c] = pd.to_datetime(df[c], infer_datetime_format=True)
+                dt_col = c; break
             except Exception:
                 pass
 
-    # ── Ensure the date column is datetime dtype ──────────────────────────────
     if dt_col and not pd.api.types.is_datetime64_any_dtype(df[dt_col]):
         df[dt_col] = pd.to_datetime(df[dt_col], errors="coerce")
 
-    plot_x     = dt_col
-    x_label    = dt_col or "Index"
-    order_map  = None
+    num       = y_cols or []
+    plot_x    = dt_col
+    x_label   = dt_col or "Index"
+    order_map = None
 
-    # ── Apply date-part aggregation ───────────────────────────────────────────
+    # Date-part grouping
     if dt_col and date_part:
-        temp_dt = pd.to_datetime(df[dt_col].astype(str), errors="coerce")
-
+        tmp = pd.to_datetime(df[dt_col].astype(str), errors="coerce")
         if date_part == "month_name":
-            df["_period"] = temp_dt.dt.month_name()
-            order_map     = _MONTH_ORDER
-            plot_x, x_label = "_period", "Month"
-
+            df["_p"] = tmp.dt.month_name(); order_map = _MONTH
+            plot_x, x_label = "_p", "Month"
         elif date_part == "weekday_name":
-            df["_period"] = temp_dt.dt.day_name()
-            order_map     = _WEEKDAY_ORDER
-            plot_x, x_label = "_period", "Weekday"
-
+            df["_p"] = tmp.dt.day_name(); order_map = _WEEKDAY
+            plot_x, x_label = "_p", "Weekday"
         else:
             try:
-                df["_period"] = temp_dt.dt.to_period(date_part).astype(str)
-                plot_x, x_label = "_period", f"{dt_col} ({date_part})"
+                df["_p"] = tmp.dt.to_period(date_part).astype(str)
+                plot_x, x_label = "_p", f"{dt_col} ({date_part})"
             except Exception:
-                pass  # fall back to raw datetime
+                pass
 
-    # ── Build one chart per metric ────────────────────────────────────────────
     for i, col in enumerate(num):
-        colour = [pal[i % len(pal)]]
+        c_pri = pal[i % len(pal)]
+        c_sec = pal[(i + 1) % len(pal)]
 
-        if dt_col and plot_x == "_period":
-            grp = df.groupby("_period")[col].agg(agg).reset_index()
-            grp.columns = ["Period", col]
+        # Aggregate primary
+        if dt_col and plot_x == "_p":
+            g = df.groupby("_p")[col].agg(agg).reset_index()
+            g.columns = ["_p", col]
             if order_map:
-                grp["_sort"] = grp["Period"].map(order_map)
-                grp = grp.sort_values("_sort").drop(columns="_sort")
+                g["_s"] = g["_p"].map(order_map)
+                g = g.sort_values("_s").drop(columns="_s")
             else:
-                grp = grp.sort_values("Period")
-            fig = px.line(
-                grp, x="Period", y=col,
-                title=f"{agg_label} {col} by {x_label}",
-                color_discrete_sequence=colour, markers=True)
-            fig.update_xaxes(type="category", title_text=x_label)
-
+                g = g.sort_values("_p")
+            x_vals = g["_p"].tolist()
+            y_vals = g[col].tolist()
         elif dt_col:
-            fig = px.line(
-                df.sort_values(dt_col), x=dt_col, y=col,
-                title=f"Time Series: {col}",
-                color_discrete_sequence=colour)
-
+            sd = df.sort_values(dt_col)
+            x_vals = sd[dt_col].tolist()
+            y_vals = sd[col].tolist()
         else:
-            fig = px.line(
-                df.reset_index(), x="index", y=col,
-                title=f"Trend: {col}",
-                color_discrete_sequence=colour)
+            r = df.reset_index()
+            x_vals = r["index"].tolist()
+            y_vals = r[col].tolist()
 
-        fig.update_layout(**chart_layout())
+        # Dual Y — aggregate secondary only if valid
+        dual = dual_y_col
+        dual_valid = (dual and dual != col and dual in df.columns)
+        y2_vals = None
+        if dual_valid:
+            if dt_col and plot_x == "_p":
+                g2 = df.groupby("_p")[dual].agg(agg).reset_index()
+                g2.columns = ["_p", dual]
+                if order_map:
+                    g2["_s"] = g2["_p"].map(order_map)
+                    g2 = g2.sort_values("_s").drop(columns="_s")
+                else:
+                    g2 = g2.sort_values("_p")
+                y2_vals = g2[dual].tolist()
+            elif dt_col:
+                y2_vals = df.sort_values(dt_col)[dual].tolist()
+            else:
+                y2_vals = df.reset_index()[dual].tolist()
+
+        # Build figure
+        if dual_valid and y2_vals is not None:
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=y_vals, mode="lines+markers",
+                name=f"{agg_lbl} {col}",
+                line=dict(color=c_pri, width=2), marker=dict(size=5),
+            ), secondary_y=False)
+            fig.add_trace(go.Scatter(
+                x=x_vals, y=y2_vals, mode="lines+markers",
+                name=f"{agg_lbl} {dual}",
+                line=dict(color=c_sec, width=2, dash="dash"), marker=dict(size=5),
+            ), secondary_y=True)
+            fig.update_layout(
+                title=f"{agg_lbl} {col} & {dual} over {x_label}",
+                **chart_layout())
+            if plot_x == "_p":
+                fig.update_xaxes(type="category", title_text=x_label)
+            fig.update_yaxes(title_text=f"{agg_lbl} {col}", secondary_y=False)
+            fig.update_yaxes(title_text=f"{agg_lbl} {dual}", secondary_y=True)
+        else:
+            if dt_col and plot_x == "_p":
+                fig = px.line(x=x_vals, y=y_vals,
+                              title=f"{agg_lbl} {col} by {x_label}",
+                              color_discrete_sequence=[c_pri], markers=True)
+                fig.update_xaxes(type="category", title_text=x_label)
+            elif dt_col:
+                fig = px.line(x=x_vals, y=y_vals,
+                              title=f"Time Series: {col}",
+                              color_discrete_sequence=[c_pri])
+            else:
+                fig = px.line(x=x_vals, y=y_vals,
+                              title=f"Trend: {col}",
+                              color_discrete_sequence=[c_pri])
+            fig.update_layout(**chart_layout())
+
         charts.append((f"TS: {col}", fig))
 
     return charts

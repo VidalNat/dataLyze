@@ -1,124 +1,840 @@
-"""modules/pages/dashboard.py — Dashboard view, save, export page."""
+"""
+modules/pages/dashboard.py
+Clean, working dashboard with:
+  - Auto-calculated KPIs (Power BI style — from dataset)
+  - Visual grid layout builder (numbered slot dropdowns, full-width toggle)
+  - Per-chart settings: title, subtitle, X/Y axis labels (applied live)
+  - Portrait / Landscape export
+  - Insights & notes displayed correctly
+"""
 
+import json, copy
+import pandas as pd
 import streamlit as st
+from html import escape
+import re
+
 from modules.database import (
     validate_token, log_activity,
-    save_session_db, update_session_db, get_session_charts,
+    save_session_db, update_session_db,
+    get_session_charts, get_session_meta,
+    clear_draft, save_draft,
 )
-from modules.charts import charts_to_json
+from modules.charts import charts_to_json, clean_insight_text
 from modules.export import generate_html_report, generate_pdf_report
-from modules.ui.css import inject_footer
+from modules.ui.css import inject_footer, render_logo
 
 
-def page_dashboard():
-    token = st.query_params.get("t", "")
-    if token and "user_id" not in st.session_state:
-        restored = validate_token(token)
-        if restored:
-            st.session_state.user_id  = restored[0]
-            st.session_state.username = restored[1]
-            st.session_state.page     = "home"
-            st.rerun()
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+def _persist():
+    uid = st.session_state.get("user_id")
+    if not uid:
+        return
+    save_draft(
+        user_id              = uid,
+        page                 = "dashboard",
+        charts_json          = charts_to_json(st.session_state.get("charts", [])),
+        file_name            = st.session_state.get("file_name", ""),
+        editing_session_id   = st.session_state.get("editing_session_id"),
+        editing_session_name = st.session_state.get("editing_session_name"),
+        dashboard_title      = st.session_state.get("dashboard_title", ""),
+        kpis_json            = json.dumps(st.session_state.get("kpis", [])),
+        chart_meta_json      = json.dumps(
+            {k: v for k, v in st.session_state.items() if k.startswith("chart_meta_")}),
+        layout_mode          = st.session_state.get("layout_mode", "portrait"),
+    )
 
-    viewing_saved = "view_session_id" in st.session_state
+
+def _meta(uid):
+    k = f"chart_meta_{uid}"
+    if k not in st.session_state:
+        st.session_state[k] = {}
+    return st.session_state[k]
+
+
+def _set_meta(uid, **kw):
+    k = f"chart_meta_{uid}"
+    if k not in st.session_state:
+        st.session_state[k] = {}
+    st.session_state[k].update(kw)
+
+
+def _apply_axes(fig, x_lbl, y_lbl):
+    if not x_lbl and not y_lbl:
+        return fig
+    try:
+        f2 = copy.deepcopy(fig)
+        if x_lbl: f2.update_xaxes(title_text=x_lbl)
+        if y_lbl: f2.update_yaxes(title_text=y_lbl)
+        return f2
+    except Exception:
+        return fig
+
+
+def _all_charts(viewing_saved):
     if viewing_saved:
-        charts = get_session_charts(st.session_state.view_session_id)
-        sname  = st.session_state.get("view_session_name", "Saved Session")
-    else:
-        charts = []
-        for uid, title, fig in st.session_state.get("charts", []):
-            charts.append((uid, title, fig, st.session_state.get(f"desc_{uid}", "")))
-        sname = f"Analysis — {st.session_state.get('file_name','')}"
+        return st.session_state.get("_view_charts", [])
+    out = []
+    for uid, title, fig in st.session_state.get("charts", []):
+        desc   = st.session_state.get(f"desc_{uid}", "")
+        autos  = st.session_state.get(f"auto_insights_{uid}", [])
+        ctype  = st.session_state.get(f"chart_type_{uid}", "")
+        meta   = _meta(uid)
+        out.append((uid, title, fig, desc, autos, ctype, meta))
+    return out
 
-    if st.button("← Back"):
-        if viewing_saved:
-            st.session_state.pop("view_session_id", None)
-        st.session_state.page = "home" if viewing_saved else "analysis"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KPI Engine  (auto-calculated — Power BI style)
+# ─────────────────────────────────────────────────────────────────────────────
+_KPI_TYPES = [
+    "Total (Sum)", "Average (Mean)", "Median", "Count (Rows)",
+    "Minimum Value", "Maximum Value",
+    "% of Total (category share)", "Unique Values Count",
+    "Date Range", "Top Category → Value", "Bottom Category → Value",
+    "% Change (Latest Month vs Prev Month)", "% Change (Latest Year vs Prev Year)",
+]
+_KPI_ICONS = {
+    "Total (Sum)":"💰","Average (Mean)":"📊","Median":"📐","Count (Rows)":"🔢",
+    "Minimum Value":"⬇️","Maximum Value":"⬆️",
+    "% of Total (category share)":"📈","Unique Values Count":"🔍",
+    "Date Range":"📅","Top Category → Value":"🏆","Bottom Category → Value":"📉",
+    "% Change (Latest Month vs Prev Month)":"📅","% Change (Latest Year vs Prev Year)":"📅",
+}
+
+
+def _calc_kpi(df, kpi_type, col=None, group_col=None, metric_col=None,
+              filter_col=None, filter_val=None, label=None):
+    num_c = df.select_dtypes(include="number").columns.tolist()
+    icon  = _KPI_ICONS.get(kpi_type, "📊")
+    val   = "—"
+    lbl   = label or kpi_type
+    pfx   = sfx = ""
+    try:
+        if kpi_type == "Total (Sum)" and col in num_c:
+            v = df[col].sum()
+            val = f"{v:,.0f}" if abs(v) >= 1000 else f"{v:.2f}"
+            lbl = label or f"Total {col}"
+        elif kpi_type == "Average (Mean)" and col in num_c:
+            val = f"{df[col].mean():,.2f}"; lbl = label or f"Avg {col}"
+        elif kpi_type == "Median" and col in num_c:
+            val = f"{df[col].median():,.2f}"; lbl = label or f"Median {col}"
+        elif kpi_type == "Count (Rows)":
+            val = f"{len(df):,}"; lbl = label or "Total Records"
+        elif kpi_type == "Minimum Value" and col in num_c:
+            val = f"{df[col].min():,.2f}"; lbl = label or f"Min {col}"
+        elif kpi_type == "Maximum Value" and col in num_c:
+            val = f"{df[col].max():,.2f}"; lbl = label or f"Max {col}"
+        elif kpi_type == "Unique Values Count" and col:
+            val = f"{df[col].nunique():,}"; lbl = label or f"Unique {col}"
+        elif kpi_type == "Date Range" and col:
+            dates = pd.to_datetime(df[col], errors="coerce").dropna()
+            if len(dates):
+                val = f"{dates.min().strftime('%d %b %y')} → {dates.max().strftime('%d %b %y')}"
+            lbl = label or f"Range of {col}"
+        elif kpi_type == "% of Total (category share)" and col in num_c and filter_col and filter_val:
+            tot = df[col].sum()
+            sub = df[df[filter_col].astype(str) == str(filter_val)][col].sum()
+            val = f"{sub/tot*100:.1f}" if tot else "0.0"; sfx = "%"
+            lbl = label or f"{filter_val} share"
+        elif kpi_type == "Top Category → Value" and group_col and metric_col in num_c:
+            grp = df.groupby(group_col)[metric_col].sum()
+            val = f"{grp.idxmax()}: {grp.max():,.0f}"; lbl = label or f"Top {group_col}"
+        elif kpi_type == "Bottom Category → Value" and group_col and metric_col in num_c:
+            grp = df.groupby(group_col)[metric_col].sum()
+            val = f"{grp.idxmin()}: {grp.min():,.0f}"; lbl = label or f"Bottom {group_col}"
+        elif kpi_type == "% Change (Latest Month vs Prev Month)" and col in num_c and filter_col:
+            dates = pd.to_datetime(df[filter_col], errors="coerce")
+            df2 = df.copy(); df2["_dt"] = dates; df2 = df2.dropna(subset=["_dt"])
+            latest_m = df2["_dt"].dt.to_period("M").max()
+            prev_m   = latest_m - 1
+            cur_val  = df2[df2["_dt"].dt.to_period("M") == latest_m][col].sum()
+            prev_val = df2[df2["_dt"].dt.to_period("M") == prev_m][col].sum()
+            pct = (cur_val - prev_val) / abs(prev_val) * 100 if prev_val else 0
+            val = f"{'+' if pct >= 0 else ''}{pct:.1f}"; sfx = "%"
+            lbl = label or f"MoM {col}"
+            return {"icon": icon, "label": lbl, "value": val, "prefix": pfx, "suffix": sfx,
+                    "change_pct": float(pct)}
+        elif kpi_type == "% Change (Latest Year vs Prev Year)" and col in num_c and filter_col:
+            dates = pd.to_datetime(df[filter_col], errors="coerce")
+            df2 = df.copy(); df2["_dt"] = dates; df2 = df2.dropna(subset=["_dt"])
+            latest_y = df2["_dt"].dt.year.max()
+            cur_val  = df2[df2["_dt"].dt.year == latest_y][col].sum()
+            prev_val = df2[df2["_dt"].dt.year == (latest_y - 1)][col].sum()
+            pct = (cur_val - prev_val) / abs(prev_val) * 100 if prev_val else 0
+            val = f"{'+' if pct >= 0 else ''}{pct:.1f}"; sfx = "%"
+            lbl = label or f"YoY {col}"
+            return {"icon": icon, "label": lbl, "value": val, "prefix": pfx, "suffix": sfx,
+                    "change_pct": float(pct)}
+    except Exception as e:
+        val = f"Err: {e}"
+    return {"icon":icon,"label":lbl,"value":val,"prefix":pfx,"suffix":sfx}
+
+
+def _kpi_card_html(kpi):
+    change_pct = kpi.get("change_pct")
+    arrow_html = ""
+    if change_pct is not None:
+        is_pos  = change_pct >= 0
+        color   = "#10b981" if is_pos else "#ef4444"
+        arrow   = "▲" if is_pos else "▼"
+        arrow_html = (
+            f'<div style="font-size:0.78rem;font-weight:700;color:{color};margin-top:3px;">'
+            f'{arrow} {abs(change_pct):.1f}% vs prior period</div>'
+        )
+    icon = escape(str(kpi.get("icon", "📊")))
+    value = escape(str(kpi.get("value", "—")))
+    prefix = escape(str(kpi.get("prefix", "")))
+    suffix = escape(str(kpi.get("suffix", "")))
+    label = escape(str(kpi.get("label", "")))
+    return (
+        f'<div style="background:rgba(79,110,247,0.07);border:1px solid rgba(79,110,247,0.18);'
+        f'border-radius:12px;padding:0.7rem 0.9rem;text-align:center;min-width:110px;'
+        f'box-shadow:0 2px 8px rgba(0,0,0,0.06);">'
+        f'<div style="font-size:1.2rem;line-height:1">{icon}</div>'
+        f'<div style="font-size:1.15rem;font-weight:800;color:#4f6ef7;line-height:1.2;margin-top:4px">'
+        f'{prefix}{value}{suffix}</div>'
+        f'{arrow_html}'
+        f'<div style="font-size:0.63rem;opacity:0.6;text-transform:uppercase;'
+        f'letter-spacing:.07em;margin-top:4px;font-weight:600">{label}</div>'
+        f'</div>'
+    )
+
+
+def _render_kpi_section(df, readonly):
+    if "kpis" not in st.session_state:
+        st.session_state.kpis = []
+
+    st.markdown("### 📌 KPI Cards")
+
+    # ── Display existing ──────────────────────────────────────────────────────
+    kpis = st.session_state.kpis
+    if kpis:
+        cols_per_row = 4
+        rows = [kpis[i:i+cols_per_row] for i in range(0, len(kpis), cols_per_row)]
+        for row in rows:
+            rcols = st.columns(len(row))
+            for ci, (kpi, rc) in enumerate(zip(row, rcols)):
+                with rc:
+                    st.markdown(_kpi_card_html(kpi), unsafe_allow_html=True)
+                    if not readonly:
+                        gi = kpis.index(kpi)
+                        if st.button("✕", key=f"kpi_rm_{gi}", help="Remove KPI",
+                                     use_container_width=True):
+                            kpis.pop(gi); _persist(); st.rerun()
+        st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Add new KPI ───────────────────────────────────────────────────────────
+    if not readonly and df is not None:
+        with st.expander("➕ Add KPI from Dataset", expanded=len(kpis) == 0):
+            num_c = df.select_dtypes(include="number").columns.tolist()
+            cat_c = df.select_dtypes(include=["object","category"]).columns.tolist()
+            all_c = df.columns.tolist()
+
+            ka, kb = st.columns(2)
+            with ka:
+                ktype  = st.selectbox("KPI Type", _KPI_TYPES, key="kpi_type")
+            with kb:
+                klabel = st.text_input("Custom Label (leave blank for auto)",
+                                       key="kpi_label",
+                                       placeholder="e.g. Total Revenue")
+
+            col = grp = met = fcol = fval = None
+
+            simple_num = {"Total (Sum)","Average (Mean)","Median",
+                          "Minimum Value","Maximum Value"}
+            if ktype in simple_num:
+                col = st.selectbox("Numeric column", num_c, key="kpi_col")
+            elif ktype == "Unique Values Count":
+                col = st.selectbox("Column", all_c, key="kpi_col2")
+            elif ktype == "Date Range":
+                dt_c = [c for c in all_c if any(x in c.lower() for x in
+                        ("date","time","dt","year","month"))] or all_c
+                col  = st.selectbox("Date column", dt_c, key="kpi_dt")
+            elif ktype == "% of Total (category share)":
+                p1, p2, p3 = st.columns(3)
+                with p1: col  = st.selectbox("Numeric col", num_c, key="kpi_pc")
+                with p2: fcol = st.selectbox("Filter col",  cat_c, key="kpi_fc") if cat_c else None
+                if fcol:
+                    uniq = df[fcol].dropna().unique().tolist()
+                    with p3: fval = st.selectbox("Filter value", uniq, key="kpi_fv")
+            elif ktype in ("Top Category → Value","Bottom Category → Value"):
+                g1, g2 = st.columns(2)
+                with g1: grp = st.selectbox("Category col", cat_c, key="kpi_grp") if cat_c else None
+                with g2: met = st.selectbox("Metric col", num_c,   key="kpi_met") if num_c else None
+            elif ktype in ("% Change (Latest Month vs Prev Month)",
+                           "% Change (Latest Year vs Prev Year)"):
+                dt_c = [c for c in all_c if any(x in c.lower() for x in
+                        ("date","time","dt","year","month"))] or all_c
+                p1, p2 = st.columns(2)
+                with p1: fcol = st.selectbox("Date column",   dt_c,  key="kpi_chg_dt")
+                with p2: col  = st.selectbox("Metric column", num_c, key="kpi_chg_met") if num_c else None
+
+            if st.button("➕ Calculate & Add KPI", type="primary", key="kpi_add_btn"):
+                kpi = _calc_kpi(df, ktype, col, grp, met, fcol, fval, klabel or None)
+                st.session_state.kpis.append(kpi)
+                _persist()
+                st.success(f"✅ {kpi['label']}: {kpi['value']}{kpi['suffix']}")
+                st.rerun()
+    elif not readonly:
+        st.caption("Upload a dataset and go to Analysis first to enable KPI calculation.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Visual Grid Layout Builder
+# ─────────────────────────────────────────────────────────────────────────────
+def _render_layout_builder(charts):
+    """
+    Present a visual 2-column grid. Each slot is a dropdown.
+    User assigns charts to specific row+slot positions.
+    Full-width toggle spans a chart across both columns.
+    """
+    if not charts:
+        return []
+
+    n = len(charts)
+    uid_list   = [c[0] for c in charts]
+    title_map  = {c[0]: c[1] for c in charts}
+    EMPTY      = "(empty)"
+    opts       = [EMPTY] + [f"[{uid}] {title_map[uid][:45]}" for uid in uid_list]
+    uid_of_opt = {f"[{uid}] {title_map[uid][:45]}": uid for uid in uid_list}
+
+    # Init order from session_state or default
+    if "grid_order" not in st.session_state or \
+            set(st.session_state.grid_order) != set(uid_list):
+        st.session_state.grid_order     = uid_list.copy()
+        st.session_state.grid_fullwidth = {}
+
+    order      = list(st.session_state.grid_order)
+    full_width = dict(st.session_state.grid_fullwidth)
+
+    st.markdown("### 🗂️ Arrange Charts in Dashboard Grid")
+    st.caption(
+        "Each row has **2 slots**. Use the dropdowns to place charts. "
+        "Tick **Full Width** to make a chart span the whole row.")
+
+    # Calculate how many rows we need (at most)
+    max_rows = n  # worst case each chart full-width
+
+    # Build assignment UI
+    st.markdown(
+        '<div style="background:rgba(79,110,247,0.04);border:2px dashed rgba(79,110,247,0.25);'
+        'border-radius:16px;padding:1.2rem 1.4rem;margin-bottom:1rem;">',
+        unsafe_allow_html=True)
+
+    assigned_uids = []  # order user placed them
+    seen = set()
+
+    for row_i in range(max_rows):
+        # Left slot
+        left_uid  = order[row_i*2]     if row_i*2     < len(order) else None
+        right_uid = order[row_i*2 + 1] if row_i*2 + 1 < len(order) else None
+
+        left_opt  = (f"[{left_uid}] {title_map.get(left_uid,'')[:45]}"
+                     if left_uid and left_uid in title_map else EMPTY)
+        right_opt = (f"[{right_uid}] {title_map.get(right_uid,'')[:45]}"
+                     if right_uid and right_uid in title_map else EMPTY)
+
+        is_fw = full_width.get(left_uid, False) if left_uid else False
+
+        # Row header
+        st.markdown(
+            f'<div style="font-size:0.75rem;font-weight:700;color:#64748b;'
+            f'text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">'
+            f'Row {row_i+1}</div>',
+            unsafe_allow_html=True)
+
+        gc1, gc2, gc3 = st.columns([5, 5, 2])
+
+        with gc1:
+            chosen_l = st.selectbox(
+                f"Slot {row_i+1}A",
+                opts,
+                index=opts.index(left_opt) if left_opt in opts else 0,
+                key=f"grid_l_{row_i}",
+                label_visibility="collapsed")
+
+        fw_here = False
+        with gc3:
+            fw_here = st.checkbox(
+                "Full width",
+                value=is_fw,
+                key=f"grid_fw_{row_i}",
+                help="Span this chart across the entire row")
+
+        if not fw_here:
+            with gc2:
+                chosen_r = st.selectbox(
+                    f"Slot {row_i+1}B",
+                    opts,
+                    index=opts.index(right_opt) if right_opt in opts else 0,
+                    key=f"grid_r_{row_i}",
+                    label_visibility="collapsed")
+        else:
+            chosen_r = EMPTY
+            with gc2:
+                st.markdown(
+                    '<div style="height:38px;display:flex;align-items:center;'
+                    'background:rgba(79,110,247,0.06);border-radius:8px;'
+                    'justify-content:center;font-size:0.8rem;opacity:0.5;">'
+                    '← Full width →</div>',
+                    unsafe_allow_html=True)
+
+        # Collect chosen uids
+        lu = uid_of_opt.get(chosen_l)
+        ru = uid_of_opt.get(chosen_r)
+        if lu and lu not in seen:
+            assigned_uids.append(lu); seen.add(lu)
+            full_width[lu] = fw_here
+        if ru and ru not in seen:
+            assigned_uids.append(ru); seen.add(ru)
+
+        # Stop adding rows when all charts placed or we hit an empty row
+        if lu is None and ru is None:
+            break
+        if len(seen) >= n:
+            break
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # Append any unplaced charts at end
+    for uid in uid_list:
+        if uid not in seen:
+            assigned_uids.append(uid)
+
+    if st.button("✅ Apply Layout", type="primary", key="apply_layout"):
+        st.session_state.grid_order     = assigned_uids
+        st.session_state.grid_fullwidth = full_width
+        _persist()
+        st.success("✅ Layout applied!")
         st.rerun()
 
-    st.markdown(f"## 📊 {sname}")
+    return assigned_uids
 
-    # ── Save / Update controls (only when not viewing a read-only saved session) ──
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-chart settings panel
+# ─────────────────────────────────────────────────────────────────────────────
+def _chart_settings(uid, title, fig, auto_insights, readonly):
+    meta = _meta(uid) if not readonly else {}
+
+    with st.expander("⚙️ Chart Settings", expanded=False):
+        if readonly:
+            st.caption("Read-only in view mode.")
+            return
+
+        # ── Title (single canonical place to edit) ────────────────────────────
+        nt = st.text_input(
+            "Chart Title",
+            value=_meta(uid).get("custom_title", "") or title,
+            key=f"ct_{uid}",
+            help="Edits the title shown inside the chart and in exports.")
+
+        a, b = st.columns(2)
+        with a:
+            sub = st.text_input("Subtitle",
+                                value=_meta(uid).get("subtitle",""),
+                                placeholder="Optional — shown below title…",
+                                key=f"sub_{uid}")
+        with b:
+            pass   # room for future field
+
+        c, d = st.columns(2)
+        with c:
+            xl = st.text_input("X-Axis label", value=_meta(uid).get("x_label",""),
+                               key=f"xl_{uid}")
+        with d:
+            yl = st.text_input("Y-Axis label", value=_meta(uid).get("y_label",""),
+                               key=f"yl_{uid}")
+
+        show_ai = st.checkbox("Show auto-insights in report",
+                              value=_meta(uid).get("show_auto_insights", True),
+                              key=f"sai_{uid}")
+        hidden = set(_meta(uid).get("hidden_insights", []))
+        if auto_insights and show_ai:
+            st.markdown("**Toggle insights (uncheck to hide from export):**")
+            new_hidden = set()
+            for i, ins in enumerate(auto_insights):
+                label = clean_insight_text(ins)
+                if not st.checkbox(label[:80]+("…" if len(label)>80 else ""),
+                                   value=i not in hidden, key=f"ins_{uid}_{i}"):
+                    new_hidden.add(i)
+            hidden = new_hidden
+
+        if st.button("💾 Save Settings", key=f"save_{uid}", type="primary"):
+            _set_meta(uid, custom_title=nt, subtitle=sub,
+                      x_label=xl, y_label=yl,
+                      show_auto_insights=show_ai,
+                      hidden_insights=list(hidden))
+            # Also update the stored chart title tuple so the list header matches
+            charts = st.session_state.get("charts", [])
+            st.session_state.charts = [
+                (c[0], nt if c[0] == uid else c[1], c[2])
+                for c in charts
+            ]
+            _persist()
+            st.success("Saved!")
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Single chart card
+# ─────────────────────────────────────────────────────────────────────────────
+def _render_chart(item, idx, total, viewing_saved):
+    uid, title, fig, desc, autos, ctype, saved_meta = \
+        item if len(item) == 7 else (*item[:6], {})
+    meta = saved_meta if viewing_saved else _meta(uid)
+    note_key = f"desc_{uid}"
+    if not viewing_saved and note_key not in st.session_state:
+        st.session_state[note_key] = desc
+
+    display = meta.get("custom_title") or title
+    sub     = meta.get("subtitle","")
+    xl      = meta.get("x_label","")
+    yl      = meta.get("y_label","")
+
+    fig_show = _apply_axes(fig, xl, yl)
+    # Apply custom title + axis readability fixes into a deepcopy
+    try:
+        import copy as _copy
+        fig_show = _copy.deepcopy(fig_show)
+        safe_display = escape(str(display))
+        safe_sub = escape(str(sub))
+        fig_show.update_layout(title_text=safe_display)
+        if sub:
+            fig_show.update_layout(title=dict(
+                text=f"{safe_display}<br><sup style='font-size:11px;color:#64748b'>{safe_sub}</sup>"))
+
+        # ── Axis readability: angle x-tick labels, shrink font, expand margin
+        is_horiz = any(getattr(t, "orientation", "v") == "h"
+                       for t in fig_show.data if hasattr(t, "orientation"))
+        if is_horiz:
+            # Horizontal bar: y-axis carries categories — clip long labels
+            fig_show.update_yaxes(tickfont=dict(size=10), automargin=True)
+            fig_show.update_xaxes(tickfont=dict(size=10))
+            fig_show.update_layout(margin=dict(l=120, r=20, t=48, b=20))
+        else:
+            # Vertical bar / other: angle x-axis ticks so they don't collide
+            fig_show.update_xaxes(tickangle=-35, tickfont=dict(size=10), automargin=True)
+            fig_show.update_yaxes(tickfont=dict(size=10), automargin=True)
+            fig_show.update_layout(margin=dict(l=20, r=20, t=48, b=80))
+    except Exception:
+        pass
+
+    # ── Control buttons (edit mode only) ─────────────────────────────────────
     if not viewing_saved:
-        is_editing = "editing_session_id" in st.session_state
-        c1, c2, c3 = st.columns([3, 1, 1])
-        with c1:
-            default_name = st.session_state.get("editing_session_name", sname) if is_editing else sname
-            sname_in = st.text_input("Session name", value=default_name)
-        with c2:
+        btn_cols = st.columns([9, 1, 1, 1])
+        with btn_cols[1]:
+            if idx > 0 and st.button("⬆", key=f"up_{uid}"):
+                cl = st.session_state.get("charts",[])
+                i  = next((j for j,c in enumerate(cl) if c[0]==uid),-1)
+                if i > 0:
+                    cl[i-1],cl[i] = cl[i],cl[i-1]
+                    go = st.session_state.get("grid_order",[])
+                    gi = next((j for j,u in enumerate(go) if u==uid),-1)
+                    if gi > 0: go[gi-1],go[gi] = go[gi],go[gi-1]
+                    _persist(); st.rerun()
+        with btn_cols[2]:
+            if idx < total-1 and st.button("⬇", key=f"dn_{uid}"):
+                cl = st.session_state.get("charts",[])
+                i  = next((j for j,c in enumerate(cl) if c[0]==uid),-1)
+                if i >= 0 and i < len(cl)-1:
+                    cl[i],cl[i+1] = cl[i+1],cl[i]
+                    go = st.session_state.get("grid_order",[])
+                    gi = next((j for j,u in enumerate(go) if u==uid),-1)
+                    if gi >= 0 and gi < len(go)-1: go[gi],go[gi+1] = go[gi+1],go[gi]
+                    _persist(); st.rerun()
+        with btn_cols[3]:
+            if st.button("🗑", key=f"rm_{uid}"):
+                st.session_state.charts = [c for c in st.session_state.get("charts",[])
+                                           if c[0] != uid]
+                if "grid_order" in st.session_state:
+                    st.session_state.grid_order = [u for u in st.session_state.grid_order
+                                                   if u != uid]
+                _persist(); st.rerun()
+
+    st.plotly_chart(fig_show, use_container_width=True)
+
+    # Insights
+    show_ai = meta.get("show_auto_insights", True)
+    hidden  = set(meta.get("hidden_insights",[]))
+    if autos and show_ai:
+        visible = [ins for i,ins in enumerate(autos) if i not in hidden]
+        if visible:
+            with st.expander("💡 Insights", expanded=False):
+                for ins in visible: st.markdown(f"- {clean_insight_text(ins)}")
+
+    # Analysis notes are independent of auto-insights and always export/save.
+    live_desc = st.session_state.get(note_key, "") if not viewing_saved else (desc or "")
+    if viewing_saved:
+        if live_desc:
+            safe_desc = escape(str(live_desc))
+            st.markdown(
+                f'<div style="background:rgba(139,92,246,0.07);border-left:3px solid #8b5cf6;'
+                f'border-radius:6px;padding:.6rem .9rem;font-size:.87rem;margin-top:.3rem;">'
+                f'<strong>Analysis Notes:</strong> {safe_desc}</div>', unsafe_allow_html=True)
+    else:
+        st.text_area(
+            "✍️ Analysis Notes",
+            key=note_key,
+            placeholder="Add your findings or observations here…")
+        if "editing_session_id" in st.session_state:
+            if st.button("💾 Update Session Notes", key=f"update_notes_{uid}",
+                         use_container_width=True):
+                _do_update(
+                    st.session_state.get("editing_session_name", "Session"),
+                    st.session_state.get("charts", []),
+                    clear_editing=False)
+                st.rerun()
+
+    _chart_settings(uid, title, fig, autos, viewing_saved)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Grid renderer — respects grid_order and grid_fullwidth
+# ─────────────────────────────────────────────────────────────────────────────
+def _render_grid(ordered_charts, viewing_saved):
+    total = len(ordered_charts)
+    fw    = st.session_state.get("grid_fullwidth", {})
+    i = 0
+    while i < total:
+        item = ordered_charts[i]
+        uid  = item[0]
+        item_meta = item[6] if viewing_saved and len(item) > 6 else _meta(uid)
+        is_fw = fw.get(uid, False) or item_meta.get("full_width", False)
+
+        if is_fw or (i == total-1 and total % 2 == 1):
+            # Full-width
+            with st.container():
+                _render_chart(item, i, total, viewing_saved)
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("💾 Save Session"):
-                df = st.session_state.get("df")
-                save_session_db(
-                    st.session_state.user_id, sname_in,
-                    st.session_state.get("file_name", ""),
-                    df.shape[0] if df is not None else 0,
-                    df.shape[1] if df is not None else 0,
-                    st.session_state.get("selected_analyses", []),
-                    charts_to_json(st.session_state.get("charts", [])))
-                log_activity(st.session_state.user_id, "dashboard_saved",
-                             f"charts={len(charts)} session='{sname_in}'")
-                st.session_state.pop("editing_session_id", None)
-                st.session_state.pop("editing_session_name", None)
-                st.success("✅ Saved as new session!")
-        with c3:
+            i += 1
+        else:
+            # Try to pair
+            if i+1 < total:
+                next_item = ordered_charts[i+1]
+                next_meta = next_item[6] if viewing_saved and len(next_item) > 6 else _meta(next_item[0])
+                next_fw = fw.get(next_item[0], False) or next_meta.get("full_width", False)
+                if not next_fw:
+                    col1, col2 = st.columns(2, gap="large")
+                    with col1: _render_chart(item,      i,   total, viewing_saved)
+                    with col2: _render_chart(next_item, i+1, total, viewing_saved)
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    i += 2
+                    continue
+            with st.container():
+                _render_chart(item, i, total, viewing_saved)
+            st.markdown("<br>", unsafe_allow_html=True)
+            i += 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main page entry
+# ─────────────────────────────────────────────────────────────────────────────
+def page_dashboard():
+    token = st.query_params.get("t","")
+    if token and "user_id" not in st.session_state:
+        r = validate_token(token)
+        if r:
+            st.session_state.user_id  = r[0]
+            st.session_state.username = r[1]
+            st.session_state.page     = "home"; st.rerun()
+
+    viewing_saved = "view_session_id" in st.session_state
+    is_editing    = "editing_session_id" in st.session_state
+    df            = st.session_state.get("df")
+
+    # Load saved session data once
+    if viewing_saved:
+        sid   = st.session_state.view_session_id
+        sname = st.session_state.get("view_session_name","Saved Session")
+        if "_view_charts" not in st.session_state or \
+                st.session_state.get("_vsid") != sid:
+            loaded = get_session_charts(sid, st.session_state.get("user_id"))
+            # Restore per-chart session_state keys (previously done inside DB layer)
+            for uid, title, fig, desc, auto, ctype, meta in loaded:
+                st.session_state[f"desc_{uid}"]          = desc
+                st.session_state[f"auto_insights_{uid}"] = auto
+                st.session_state[f"chart_type_{uid}"]    = ctype
+                st.session_state[f"chart_meta_{uid}"]    = meta
+            st.session_state._view_charts = loaded
+            st.session_state._vsid        = sid
+        sm = get_session_meta(sid, st.session_state.get("user_id"))
+        if sm is None:
+            st.error("That saved session was not found for this account.")
+            for k in ["view_session_id","_view_charts","_vsid",
+                      "dashboard_title","kpis","layout_mode"]:
+                st.session_state.pop(k, None)
+            st.session_state.page = "home"
+            st.rerun()
+        st.session_state.setdefault("dashboard_title", sm["dashboard_title"])
+        st.session_state.setdefault("layout_mode",     sm["layout_mode"])
+        if "kpis" not in st.session_state:
+            try:   st.session_state.kpis = json.loads(sm["kpis_json"])
+            except: st.session_state.kpis = []
+        df = None  # No live df when viewing saved
+    else:
+        sname = f"Analysis — {st.session_state.get('file_name','')}"
+
+    charts = _all_charts(viewing_saved)
+
+    render_logo()
+    if st.button("← Back"):
+        if viewing_saved:
+            for k in ["view_session_id","_view_charts","_vsid",
+                      "dashboard_title","kpis","layout_mode"]:
+                st.session_state.pop(k, None)
+            st.session_state.page = "home"
+        else:
+            st.session_state.page = "analysis"
+        st.rerun()
+
+    # ── Dashboard title ───────────────────────────────────────────────────────
+    if not viewing_saved:
+        ti = st.text_input("📋 Dashboard Title",
+                           value=st.session_state.get("dashboard_title",""),
+                           placeholder="e.g. Q1 2025 Sales Dashboard",
+                           key="dbtitle")
+        if ti != st.session_state.get("dashboard_title",""):
+            st.session_state.dashboard_title = ti; _persist()
+
+    display_title = st.session_state.get("dashboard_title") or sname
+    st.header(f"📊 {display_title}")
+
+    # ── Layout mode ───────────────────────────────────────────────────────────
+    if not viewing_saved:
+        lo = st.radio("📐 Export Layout", ["Portrait","Landscape"],
+                      index=1 if st.session_state.get("layout_mode")=="landscape" else 0,
+                      horizontal=True)
+        st.session_state.layout_mode = lo.lower()
+
+    # ── Save / Update — at the TOP so it's always visible ────────────────────
+    if not viewing_saved:
+        sc1, sc2, sc3 = st.columns([3,1,1])
+        with sc1:
+            def_name = st.session_state.get("editing_session_name", sname) if is_editing else sname
+            sname_in = st.text_input("Session name", value=def_name, key="sname_in")
+        with sc2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("💾 Save", use_container_width=True):
+                _do_save(sname_in, charts, df)
+        with sc3:
             if is_editing:
                 st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("🔄 Update Saved Session"):
-                    eid = st.session_state.editing_session_id
-                    update_session_db(
-                        eid, sname_in,
-                        charts_to_json(st.session_state.get("charts", [])),
-                        st.session_state.get("selected_analyses", []),
-                        st.session_state.user_id)
-                    st.success(f"✅ Session '{sname_in}' updated!")
-                    st.session_state.pop("editing_session_id", None)
-                    st.session_state.pop("editing_session_name", None)
+                if st.button("🔄 Update", use_container_width=True):
+                    _do_update(sname_in, charts)
 
     st.markdown("---")
 
-    # ── Export — lazy PDF (only generated on explicit click) ──────────────────
-    if charts:
-        exp1, exp2, _ = st.columns([2, 2, 4])
-        with exp1:
-            html_data = generate_html_report(charts, sname)
-            st.download_button(
-                label="🌐 Download as Interactive HTML",
-                data=html_data,
-                file_name=f"{sname.replace(' ', '_')}.html",
-                mime="text/html",
-                use_container_width=True)
-        with exp2:
-            pdf_key = f"pdf_cache_{sname}"
-            if st.button("📄 Generate PDF", key="gen_pdf_btn", use_container_width=True):
-                with st.spinner("Building PDF…"):
-                    try:
-                        st.session_state[pdf_key] = generate_pdf_report(charts, sname)
-                    except Exception as e:
-                        st.error(f"⚠️ PDF failed (install kaleido): {e}")
-            if pdf_key in st.session_state:
-                st.download_button(
-                    label="⬇️ Download PDF",
-                    data=st.session_state[pdf_key],
-                    file_name=f"{sname.replace(' ', '_')}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                    key="dl_pdf_btn")
+    # ── KPIs ─────────────────────────────────────────────────────────────────
+    _render_kpi_section(df, readonly=viewing_saved)
+    st.markdown("---")
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    if not charts:
+        st.info("No charts yet. Go back to Analysis to generate some!")
+        inject_footer()
+        return
 
-    # ── Chart grid ─────────────────────────────────────────────────────────────
-    for i in range(0, len(charts), 2):
-        col1, col2 = st.columns(2)
-        with col1:
-            if i < len(charts):
-                st.markdown(f"#### {charts[i][1]}")
-                st.plotly_chart(charts[i][2], use_container_width=True)
-                if charts[i][3]: st.info(f"📝 **Notes:** {charts[i][3]}")
-        with col2:
-            if i + 1 < len(charts):
-                st.markdown(f"#### {charts[i+1][1]}")
-                st.plotly_chart(charts[i+1][2], use_container_width=True)
-                if charts[i+1][3]: st.info(f"📝 **Notes:** {charts[i+1][3]}")
+    # Resolve grid order
+    uid_map   = {c[0]: c for c in charts}
+    go_order  = st.session_state.get("grid_order", [c[0] for c in charts])
+    ordered   = [uid_map[u] for u in go_order if u in uid_map]
+    # Append unplaced
+    placed    = {c[0] for c in ordered}
+    for c in charts:
+        if c[0] not in placed: ordered.append(c)
 
+    # ── Export ────────────────────────────────────────────────────────────────
+    if ordered:
+        _export_row(ordered, sname, viewing_saved)
+        st.markdown("---")
+
+    # ── Layout builder ────────────────────────────────────────────────────────
+    if charts and not viewing_saved:
+        with st.expander("🗂️ Arrange Dashboard Layout", expanded=False):
+            _render_layout_builder(charts)
+        st.markdown("---")
+
+    st.markdown("### 📈 Dashboard")
+    _render_grid(ordered, viewing_saved)
     inject_footer()
+
+
+def _export_row(charts, sname, viewing_saved):
+    orient     = st.session_state.get("layout_mode","portrait")
+    kpis       = st.session_state.get("kpis",[])
+    dash_title = st.session_state.get("dashboard_title","") or sname
+
+    export_charts = []
+    full_width = st.session_state.get("grid_fullwidth", {})
+    for item in charts:
+        uid  = item[0]
+        meta = dict(item[6] if len(item)>6 else _meta(uid))
+        if full_width.get(uid):
+            meta["full_width"] = True
+        fig  = _apply_axes(item[2], meta.get("x_label",""), meta.get("y_label",""))
+        # Read notes from session_state live so they're always current
+        notes = st.session_state.get(f"desc_{uid}", "") or (item[3] if len(item) > 3 else "")
+        export_charts.append((uid, item[1], fig, notes, item[4] if len(item)>4 else [],
+                              item[5] if len(item)>5 else "", meta))
+
+    e1, e2, _ = st.columns([2,2,4])
+    safe_file = re.sub(r"[^A-Za-z0-9_.-]+", "_", dash_title).strip("._") or "lytrize_report"
+    with e1:
+        html = generate_html_report(export_charts, sname,
+                                    orientation=orient, kpis=kpis,
+                                    dashboard_title=dash_title)
+        st.download_button("🌐 Download HTML", html,
+                           file_name=f"{safe_file}.html",
+                           mime="text/html", use_container_width=True)
+    with e2:
+        pk = f"pdf_{sname}"
+        if st.button("📄 Generate PDF", key="gen_pdf", use_container_width=True):
+            with st.spinner("Building PDF…"):
+                try:
+                    st.session_state[pk] = generate_pdf_report(
+                        export_charts, sname, orientation=orient,
+                        kpis=kpis, dashboard_title=dash_title)
+                except Exception as e:
+                    st.error(f"PDF error: {e}")
+        if pk in st.session_state:
+            st.download_button("⬇️ Download PDF", st.session_state[pk],
+                               file_name=f"{safe_file}.pdf",
+                               mime="application/pdf",
+                               use_container_width=True, key="dl_pdf")
+
+
+def _do_save(sname_in, charts, df):
+    save_session_db(
+        st.session_state.user_id, sname_in,
+        st.session_state.get("file_name",""),
+        df.shape[0] if df is not None else 0,
+        df.shape[1] if df is not None else 0,
+        st.session_state.get("selected_analyses",[]),
+        charts_to_json(st.session_state.get("charts",[])),
+        dashboard_title = st.session_state.get("dashboard_title",""),
+        kpis_json       = json.dumps(st.session_state.get("kpis",[])),
+        layout_mode     = st.session_state.get("layout_mode","portrait"))
+    clear_draft(st.session_state.user_id)
+    st.session_state.pop("editing_session_id",   None)
+    st.session_state.pop("editing_session_name", None)
+    st.success(f"✅ Saved as '{sname_in}'!")
+
+
+def _do_update(sname_in, charts, clear_editing=True):
+    eid = st.session_state.editing_session_id
+    update_session_db(
+        eid, sname_in,
+        charts_to_json(st.session_state.get("charts",[])),
+        st.session_state.get("selected_analyses",[]),
+        st.session_state.user_id,
+        dashboard_title = st.session_state.get("dashboard_title",""),
+        kpis_json       = json.dumps(st.session_state.get("kpis",[])),
+        layout_mode     = st.session_state.get("layout_mode","portrait"))
+    clear_draft(st.session_state.user_id)
+    st.success(f"✅ Updated '{sname_in}'!")
+    if clear_editing:
+        st.session_state.pop("editing_session_id",   None)
+        st.session_state.pop("editing_session_name", None)

@@ -1,8 +1,11 @@
-"""modules/pages/auth.py — Login & Registration page."""
+"""
+modules/pages/auth.py — Login & Registration page.
+Logo is text-only here per spec (#10).
+"""
 
 import streamlit as st
 from modules.database import login_user, register_user, validate_token, create_token, log_activity
-from modules.ui.css import inject_footer
+from modules.ui.css import BRAND_NAME, inject_footer, logo_data_uri
 
 
 def page_auth():
@@ -24,11 +27,19 @@ def page_auth():
 
     _, col, _ = st.columns([1, 0.85, 1])
     with col:
+        logo_src = logo_data_uri()
+        icon_html = (
+            f'<img src="{logo_src}" alt="{BRAND_NAME} logo" '
+            'style="width:2.2rem;height:2.2rem;object-fit:contain;vertical-align:middle;margin-right:8px;">'
+            if logo_src else
+            '<span style="font-size:2rem;line-height:1;vertical-align:middle;margin-right:8px;">&#128202;</span>'
+        )
         st.markdown(
             '<div style="text-align:center;padding-top:3rem;margin-bottom:2rem;">'
-            '<div class="brand" style="font-size:2rem;">📊 DataLyze</div>'
+            f'<div style="display:inline-flex;align-items:center;justify-content:center;">{icon_html}'
+            f'<span class="brand" style="font-size:2rem;">{BRAND_NAME}</span></div>'
             '<div style="font-size:0.88rem;margin-top:0.5rem;opacity:0.65;">'
-            'Intelligent Data Analysis Platform</div>'
+            'Quick Analysis Platform</div>'
             '</div>',
             unsafe_allow_html=True)
 
@@ -64,9 +75,9 @@ def page_auth():
                 else:
                     st.error("Incorrect username or password.")
         else:
-            ru  = st.text_input("Username", key="r_u")
-            re  = st.text_input("Email",    key="r_e")
-            rp  = st.text_input("Password", type="password", key="r_p")
+            ru  = st.text_input("Username",         key="r_u")
+            re  = st.text_input("Email",            key="r_e")
+            rp  = st.text_input("Password",         type="password", key="r_p")
             rp2 = st.text_input("Confirm Password", type="password", key="r_p2")
             if st.button("Create Account →", use_container_width=True):
                 if rp != rp2:       st.error("Passwords don't match.")

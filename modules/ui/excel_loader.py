@@ -6,10 +6,12 @@ Handles Excel files with multiple sheets. Gives the user two paths:
 PATH A — Single Sheet
     Browse all sheets with previews, pick one, proceed as normal.
 
-PATH B — Star Schema Modeler
+PATH B — Unified Table builder
     Pick a Fact table sheet + Dimension table sheets, map join keys
     between each Dim and the Fact, choose join type, then merge everything
     into one flat DataFrame that feeds into the standard analysis pipeline.
+
+** Base table = Fact table in variables & cod ; Additional table = Dim table in variables & code
 
 Returns a ready-to-use pd.DataFrame (or None if the user has not confirmed yet).
 """
@@ -17,6 +19,7 @@ Returns a ready-to-use pd.DataFrame (or None if the user has not confirmed yet).
 import streamlit as st
 import pandas as pd
 import numpy as np
+from html import escape
 from itertools import combinations
 
 
@@ -24,7 +27,15 @@ from itertools import combinations
 
 def _load_all_sheets(file) -> dict[str, pd.DataFrame]:
     """Read every sheet from the uploaded Excel file into a dict."""
+    file.seek(0)
     return pd.read_excel(file, sheet_name=None)   # sheet_name=None → all sheets
+
+
+def _file_key(uploaded_file) -> str:
+    file_id = getattr(uploaded_file, "file_id", None)
+    size = getattr(uploaded_file, "size", None)
+    token = file_id or f"{size}_{len(uploaded_file.getbuffer())}"
+    return f"_xl_sheets_{uploaded_file.name}_{token}"
 
 
 def _common_columns(df_a: pd.DataFrame, df_b: pd.DataFrame) -> list[str]:
@@ -55,7 +66,7 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
     Returns a merged/selected DataFrame when the user confirms,
     or None while they are still configuring.
     """
-    file_key = f"_xl_sheets_{uploaded_file.name}"
+    file_key = _file_key(uploaded_file)
 
     # Cache sheets in session state so we don't re-read on every widget interaction
     if file_key not in st.session_state:
@@ -75,11 +86,12 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
     cols = st.columns(min(len(sheet_names), 4))
     for i, name in enumerate(sheet_names):
         df_s = sheets[name]
+        safe_name = escape(str(name))
         with cols[i % 4]:
             st.markdown(
                 f"""<div style="background:rgba(79,110,247,0.08);border:1px solid rgba(79,110,247,0.2);
                 border-radius:12px;padding:0.9rem 1rem;margin-bottom:0.5rem;">
-                <div style="font-weight:700;font-size:0.9rem;margin-bottom:4px;">📄 {name}</div>
+                <div style="font-weight:700;font-size:0.9rem;margin-bottom:4px;">📄 {safe_name}</div>
                 <div style="font-size:0.75rem;opacity:0.75;">{_shape_tag(df_s)}</div>
                 <div style="font-size:0.72rem;opacity:0.6;">{_dtype_summary(df_s)}</div>
                 </div>""",
@@ -93,7 +105,7 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
         "How do you want to use this file?",
         options=[
             "📋  Use a single sheet for analysis",
-            "🔗  Model multiple sheets (Star Schema / Table Join)",
+            "🔗  Model multiple sheets (Table Join)",
         ],
         key="_xl_mode",
         horizontal=False,
@@ -121,28 +133,28 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
         return None   # waiting for user to confirm
 
     # ═════════════════════════════════════════════════════════════════════════
-    # PATH B — Star Schema / Multi-table join
+    # PATH B — Multi-table join
     # ═════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 🌟 Star Schema Builder")
+    st.markdown("### 🔗 Unified Table Builder")
     st.markdown(
-        "A **star schema** has one central **Fact table** (transactions, sales, events) "
-        "surrounded by **Dimension tables** (products, customers, dates) linked by common key columns. "
-        "The result is one flat table ready for analysis."
+        "Merge all your sheets into one comprehensive table. Perfect for analyzing related data across multiple sheets without complex joins. "
+        "Step 1 — Select your Base table "
+        "This table will be the foundation. We'll attach other sheets to it automatically."
     )
 
     # Step 1 — Pick fact table
     st.markdown("#### Step 1 — Choose your Fact table")
-    st.caption("The Fact table contains your main measurements (sales amounts, quantities, events). It's usually the largest sheet.")
+    st.caption("TThe Base table is your main dataset with unique metrics like (transactions, records, events etc). Other sheets will be merged into this table. It's usually the largest or most central sheet.")
     fact_name = st.selectbox("Fact table sheet:", sheet_names, key="_xl_fact")
     fact_df   = sheets[fact_name]
 
-    with st.expander(f"👁️ Fact table preview — {fact_name}  ({_shape_tag(fact_df)})", expanded=False):
+    with st.expander(f"👁️ Base table preview — {fact_name}  ({_shape_tag(fact_df)})", expanded=False):
         st.dataframe(fact_df.head(8), use_container_width=True)
 
     # Step 2 — Pick dimension tables
     st.markdown("#### Step 2 — Choose Dimension tables to join")
-    st.caption("Dimension tables add descriptive context (product names, customer details, date labels). Pick one or more.")
+    st.caption("Pick sheets to combine with your Primary table. We'll automatically link them together using matching columns to create one complete dataset.")
     dim_options = [s for s in sheet_names if s != fact_name]
     selected_dims = st.multiselect(
         "Dimension table sheets:",
@@ -151,14 +163,14 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
     )
 
     if not selected_dims:
-        st.info("Select at least one Dimension table to continue.")
+        st.info("Select at least one Additional table to continue.")
         return None
 
     # Step 3 — Configure join for each dim
     st.markdown("#### Step 3 — Map join keys")
     st.caption(
-        "For each Dimension table, pick the column that links it to the Fact table. "
-        "This is the **Primary Key** in the Dim and the **Foreign Key** in the Fact."
+        "For each additional table, select the column that matches your Primary table. "
+        "We'll use these shared columns to correctly merge your datasets."
     )
 
     join_configs: list[dict] = []
@@ -243,7 +255,7 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
 
     # Step 4 — Schema diagram (text representation)
     st.markdown("---")
-    st.markdown("#### Step 4 — Schema summary")
+    st.markdown("#### Step 4 — Unifier summary")
 
     schema_lines = [f"**FACT:** 📊 {fact_name}  ({_shape_tag(fact_df)})"]
     for cfg in join_configs:
@@ -303,13 +315,13 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
             st.markdown(f"- {entry}")
 
         st.success(
-            f"✅ Star schema built — **{merged.shape[0]:,} rows × {merged.shape[1]} columns** "
+            f"✅ Unified Table built — **{merged.shape[0]:,} rows × {merged.shape[1]} columns** "
             f"ready for analysis."
         )
         #st.dataframe(merged.head(10), use_container_width=True)
 
-        # Store schema metadata for display later
-        st.session_state["_star_schema_info"] = {
+        # Unified Table metadata for display later
+        st.session_state["_unified_table_info"] = {
             "fact": fact_name,
             "dims": [c["dim_name"] for c in join_configs],
             "shape": merged.shape,

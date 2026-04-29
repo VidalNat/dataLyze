@@ -1,13 +1,31 @@
 """
 modules/ui/css.py
-Injects all global styles for DataLyze:
+Injects all global styles for Lytrize:
   - Dynamic font system that adapts to browser light/dark mode AND Streamlit theme
   - Modern aurora/mesh gradient background
   - Component styles (cards, buttons, badges, session rows)
   - Footer styles
 """
 
+import base64
+from functools import lru_cache
+from pathlib import Path
+
 import streamlit as st
+from html import escape
+
+
+BRAND_NAME = "Lytrize"
+LOGO_PATH = Path(__file__).resolve().parents[2] / "assets" / "lytrize.ico"
+
+
+@lru_cache(maxsize=1)
+def logo_data_uri() -> str:
+    try:
+        data = base64.b64encode(LOGO_PATH.read_bytes()).decode("ascii")
+        return f"data:image/x-icon;base64,{data}"
+    except Exception:
+        return ""
 
 
 def inject_css():
@@ -144,26 +162,26 @@ def inject_css():
         box-shadow: 0 8px 32px rgba(79,110,247,0.15) !important;
     }
 
-    .kpi-card { padding: 1.4rem 1rem; text-align: center; }
-    .kpi-icon { font-size: 1.5rem; margin-bottom: 0.3rem; }
-    .kpi-val  { font-family: var(--font-brand); font-size: 2rem; font-weight: 800;
+    .kpi-card { padding: 0.65rem 0.8rem; text-align: center; }
+    .kpi-icon { font-size: 1.1rem; margin-bottom: 0.2rem; }
+    .kpi-val  { font-family: var(--font-brand); font-size: 1.4rem; font-weight: 800;
                 line-height: 1.1; color: var(--text-primary); }
-    .kpi-lbl  { font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.1em;
-                font-weight: 600; color: var(--text-muted); margin-top: 0.3rem; }
+    .kpi-lbl  { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.1em;
+                font-weight: 600; color: var(--text-muted); margin-top: 0.2rem; }
 
-    .ag-card  { padding: 1.3rem 1rem; text-align: center; min-height: 130px;
+    .ag-card  { padding: 0.8rem 0.7rem; text-align: center; min-height: 90px;
                 display: flex; flex-direction: column; align-items: center; justify-content: center; }
     .ag-card.done { border-color: var(--brand-1) !important;
                     box-shadow: 0 0 0 2px rgba(79,110,247,0.25) !important; }
-    .ag-icon  { font-size: 1.9rem; margin-bottom: 0.4rem; }
-    .ag-name  { font-weight: 700; font-size: 0.92rem; color: var(--text-primary); }
-    .ag-desc  { font-size: 0.72rem; color: var(--text-muted); margin-top: 0.25rem; line-height: 1.4; }
-    .done-badge { font-size: 0.66rem; background: var(--success); color: #fff;
-                  padding: 0.15rem 0.55rem; border-radius: 20px; margin-top: 0.4rem; }
+    .ag-icon  { font-size: 1.35rem; margin-bottom: 0.25rem; }
+    .ag-name  { font-weight: 700; font-size: 0.8rem; color: var(--text-primary); }
+    .ag-desc  { font-size: 0.65rem; color: var(--text-muted); margin-top: 0.18rem; line-height: 1.3; }
+    .done-badge { font-size: 0.62rem; background: var(--success); color: #fff;
+                  padding: 0.1rem 0.45rem; border-radius: 20px; margin-top: 0.3rem; }
 
-    .sess-card { padding: 0.85rem 1.1rem; }
-    .sess-card b { color: var(--text-primary); font-size: 0.95rem; }
-    .sess-card small { color: var(--text-muted); font-size: 0.75rem; }
+    .sess-card { padding: 0.55rem 0.8rem; }
+    .sess-card b { color: var(--text-primary); font-size: 0.88rem; }
+    .sess-card small { color: var(--text-muted); font-size: 0.7rem; }
 
     /* ═══════════════════════════════════════════════════════════
        BRAND & TYPOGRAPHY
@@ -177,6 +195,13 @@ def inject_css():
         -webkit-text-fill-color: transparent;
         background-clip: text;
         letter-spacing: -0.03em;
+    }
+
+    .brand-logo-img {
+        width: 1.65rem;
+        height: 1.65rem;
+        object-fit: contain;
+        display: inline-block;
     }
 
     .sec-label {
@@ -301,6 +326,28 @@ def inject_css():
     """, unsafe_allow_html=True)
 
 
+def render_logo():
+    """
+    Renders the Lytrize logo at the top of every page (except auth).
+    Clicking the logo navigates to the profile/home page.
+    """
+    token = st.query_params.get("t", "")
+    home_url = f"?p=home&nav=home&t={escape(str(token), quote=True)}" if token else "?p=home&nav=home"
+    logo_src = logo_data_uri()
+    icon_html = (
+        f'<img class="brand-logo-img" src="{logo_src}" alt="{BRAND_NAME} logo">'
+        if logo_src else '<span style="font-size:1.5rem;line-height:1;">&#128202;</span>'
+    )
+
+    st.markdown(
+        f'<a href="{home_url}" target="_self" style="text-decoration:none;display:inline-flex;'
+        f'align-items:center;gap:6px;cursor:pointer;">'
+        f'{icon_html}'
+        f'<span class="brand">{BRAND_NAME}</span>'
+        f'</a>',
+        unsafe_allow_html=True)
+
+
 def inject_footer():
     """
     Renders the site-wide footer using st.components.v1.html.
@@ -312,7 +359,8 @@ def inject_footer():
     # Inject a spacer div to create the visual gap above the footer
     st.markdown("<div style='margin-top: 5rem;'></div>", unsafe_allow_html=True)
     
-    components.html("""<!DOCTYPE html>
+    footer_logo = logo_data_uri()
+    footer_html = """<!DOCTYPE html>
 <html>
 <head>
 <style>
@@ -338,7 +386,8 @@ body { font-family: Inter, system-ui, sans-serif; font-size: 14px; }
   .ft-badge { background: rgba(79,110,247,0.08); border: 1px solid rgba(79,110,247,0.2); color: #4f6ef7; }
   .ft-bottom { color: #94a3b8; border-color: rgba(0,0,0,0.08); }
 }
-.ft-brand { font-size: 18px; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 8px; }
+.ft-brand { font-size: 18px; font-weight: 800; letter-spacing: -0.03em; margin-bottom: 8px; display: inline-flex; align-items: center; gap: 7px; }
+.ft-brand img { width: 22px; height: 22px; object-fit: contain; }
 .ft-tagline { font-size: 12.5px; line-height: 1.7; margin-bottom: 14px; }
 .ft-social { display: flex; gap: 8px; flex-wrap: wrap; }
 .ft-social-btn { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 8px; font-size: 12px; font-weight: 500; text-decoration: none; transition: border-color .15s, color .15s; }
@@ -353,7 +402,7 @@ body { font-family: Inter, system-ui, sans-serif; font-size: 14px; }
 <div class="ft">
   <div class="ft-grid">
     <div>
-      <div class="ft-brand">&#128202; DataLyze</div>
+      <div class="ft-brand"><img src="__LYTRIZE_LOGO__" alt="Lytrize logo"> Lytrize</div>
       <div class="ft-tagline">Open-source, browser-based data analysis.<br>Upload. Explore. Share. No code required.</div>
       <div class="ft-social">
         <a class="ft-social-btn" href="https://github.com/VidalNat/dataLyze" target="_blank">
@@ -394,7 +443,7 @@ body { font-family: Inter, system-ui, sans-serif; font-size: 14px; }
     </div>
   </div>
   <div class="ft-bottom">
-    <span>&#169; 2026 DataLyze &nbsp;&#183;&nbsp; MIT License</span>
+    <span>&#169; 2026 Lytrize &nbsp;&#183;&nbsp; MIT License</span>
     <span>Built with &#10084;&#65039; using
       <span class="ft-badge">Streamlit</span>
       <span class="ft-badge">Plotly</span>
@@ -403,5 +452,6 @@ body { font-family: Inter, system-ui, sans-serif; font-size: 14px; }
   </div>
 </div>
 </body>
-</html>""", height=260, scrolling=False)
+</html>"""
+    components.html(footer_html.replace("__LYTRIZE_LOGO__", footer_logo), height=260, scrolling=False)
     
