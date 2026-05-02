@@ -70,7 +70,8 @@ def _h(text) -> str:
 
 # ── HTML Export ───────────────────────────────────────────────────────────────
 def generate_html_report(charts, session_name, orientation="portrait",
-                         kpis=None, dashboard_title="", grid_cols_n=2):
+                         kpis=None, dashboard_title="", grid_cols_n=2,
+                         inline_plotly=False):
     is_landscape = orientation == "landscape"
     max_width    = "1400px" if is_landscape else "1100px"
     # Use grid_cols_n for the CSS grid; full-width items span all columns
@@ -132,7 +133,9 @@ def generate_html_report(charts, session_name, orientation="portrait",
         fig_resp.update_layout(autosize=True, width=None, height=400,
                                paper_bgcolor="white", plot_bgcolor="white")
 
-        include_js  = "cdn" if idx == 0 else False
+        # inline_plotly=True embeds the full JS so no CDN fetch is needed
+        # (used by PDF path; CDN is fine for the HTML download).
+        include_js  = (True if idx == 0 else False) if inline_plotly else ("cdn" if idx == 0 else False)
         chart_html  = fig_resp.to_html(full_html=False, include_plotlyjs=include_js,
                                        config={"responsive": True})
 
@@ -311,12 +314,16 @@ def generate_pdf_report(charts, session_name, orientation="portrait",
     is_landscape = orientation == "landscape"
 
     # Build the same HTML the "Download HTML" button produces.
+    # inline_plotly=True embeds Plotly JS directly into the HTML so the
+    # headless Chromium browser doesn't need to fetch cdn.plot.ly — which
+    # is blocked inside Streamlit Cloud containers.
     html_content = generate_html_report(
         charts, session_name,
         orientation=orientation,
         kpis=kpis,
         dashboard_title=dashboard_title,
         grid_cols_n=grid_cols_n,
+        inline_plotly=True,
     )
 
     # Inject print CSS — disable ALL page breaks so the entire dashboard
@@ -346,7 +353,7 @@ def generate_pdf_report(charts, session_name, orientation="portrait",
         # Use a tall viewport so Plotly lays out charts at full size
         # before we measure the true rendered height.
         vp_width = 1400 if is_landscape else 1100
-        page = browser.new_page(viewport={"width": vp_width, "height": 1100})
+        page = browser.new_page(viewport={"width": vp_width, "height": 5000})
 
         # networkidle waits for Plotly CDN + initial render.
         page.set_content(html_content, wait_until="networkidle", timeout=60_000)
