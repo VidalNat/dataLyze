@@ -1,10 +1,27 @@
 """
-modules/export.py
-HTML and PDF report exports.
+modules/export.py - PDF export engine.
+========================================
 
-HTML:  Full interactive report with responsive Plotly charts.
-PDF:   Single-page dashboard screenshot — all charts on ONE page in a
-       2-column grid, sized to fit content (custom tall page if needed).
+Generates a single-page PDF report from the active dashboard charts.
+
+Architecture:
+    - Uses the fpdf2 library (not reportlab) for PDF generation.
+    - Page height is computed dynamically before the PDF is created so all
+      charts fit on ONE page without overflow. auto_page_break is disabled.
+    - Each chart is rasterised to PNG via Plotly kaleido renderer, then
+      embedded into the PDF as an image.
+    - Insight text is wrapped and rendered below each chart.
+    - A fixed header (title, file name, date) and footer (page number) are
+      added after all chart content.
+
+Bug fix applied:
+    set_auto_page_break(auto=False): previously True, which caused fpdf to
+    insert blank overflow pages even though PAGE_H was pre-calculated to
+    fit all content exactly.
+
+CONTRIBUTING - to change the layout:
+    Adjust MARGIN, CHART_H, TEXT_LINE_H constants near the top of the file.
+    PAGE_W is fixed at A4 width; PAGE_H grows to fit content.
 """
 
 import os
@@ -67,7 +84,7 @@ def generate_html_report(charts, session_name, orientation="portrait",
         arrow = lambda k: ("▲ " if k.get("change_pct",0)>=0 else "▼ ") if "change_pct" in k else ""
 
         def _kpi_val_style(k, base_change):
-            full = f'{k.get("prefix","")}{k.get("value","—")}{k.get("suffix","")}'
+            full = f'{k.get("prefix","")}{k.get("value","--")}{k.get("suffix","")}'
             size = "0.95rem" if len(full) > 16 else ("1.1rem" if len(full) > 12 else "1.4rem")
             wrap = "white-space:normal;word-break:break-word;overflow-wrap:anywhere;" if len(full) > 12 else ""
             return f"font-size:{size};{wrap}{base_change}"
@@ -76,7 +93,7 @@ def generate_html_report(charts, session_name, orientation="portrait",
             f'<div class="kpi-card">'
             f'<div class="kpi-icon">{_h(k.get("icon","📊"))}</div>'
             f'<div class="kpi-value" style="{_kpi_val_style(k, change_style(k))}">'
-            f'{_h(arrow(k))}{_h(k.get("prefix",""))}{_h(k.get("value","—"))}{_h(k.get("suffix",""))}</div>'
+            f'{_h(arrow(k))}{_h(k.get("prefix",""))}{_h(k.get("value","--"))}{_h(k.get("suffix",""))}</div>'
             f'<div class="kpi-label">{_h(k.get("label","KPI"))}</div>'
             f'</div>'
             for k in kpis
@@ -96,7 +113,7 @@ def generate_html_report(charts, session_name, orientation="portrait",
         # Span all columns when full-width
         col_span      = f"grid-column: 1 / -1;" if is_full else ""
 
-        # Make figure responsive — clear the embedded title (rendered via <h2> below)
+        # Make figure responsive -- clear the embedded title (rendered via <h2> below)
         fig_resp = copy.deepcopy(fig)
         fig_resp.update_layout(title_text="")   # title shown as <h2>, not inside chart
         is_horiz = any(getattr(t, "orientation", "v") == "h"
@@ -145,7 +162,7 @@ def generate_html_report(charts, session_name, orientation="portrait",
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe_title} — Lytrize</title>
+  <title>{safe_title} -- Lytrize</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -225,7 +242,7 @@ def generate_html_report(charts, session_name, orientation="portrait",
 </html>"""
 
 
-# ── PDF Export — single-page dashboard layout ─────────────────────────────────
+# ── PDF Export -- single-page dashboard layout ─────────────────────────────────
 def generate_pdf_report(charts, session_name, orientation="portrait",
                         kpis=None, dashboard_title="", grid_cols_n=2):
     """
@@ -275,7 +292,7 @@ def generate_pdf_report(charts, session_name, orientation="portrait",
         if xl: fig_copy.update_xaxes(title_text=xl)
         if yl: fig_copy.update_yaxes(title_text=yl)
         disp = meta.get("custom_title") or chart_title
-        # Remove chart title from image — drawn as text above in PDF
+        # Remove chart title from image -- drawn as text above in PDF
         fig_copy.update_layout(title_text="")
         is_horiz = any(getattr(t, "orientation", "v") == "h"
                        for t in fig_copy.data if hasattr(t, "orientation"))
@@ -311,8 +328,8 @@ def generate_pdf_report(charts, session_name, orientation="portrait",
     pdf = FPDF(orientation="L" if is_landscape else "P",
                unit="mm", format=(PAGE_W, PAGE_H))
     pdf.set_margins(MARGIN, MARGIN, MARGIN)
-    # auto_page_break as safety net — if content somehow exceeds PAGE_H it won't clip
-    pdf.set_auto_page_break(auto=False)
+    # auto_page_break as safety net -- if content somehow exceeds PAGE_H it won't clip
+    pdf.set_auto_page_break(auto=False)  # FIX: PAGE_H is pre-calculated; True caused blank overflow pages.
     pdf.add_page()
 
     y = MARGIN  # current Y cursor

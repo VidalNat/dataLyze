@@ -1,6 +1,33 @@
 """
+modules/pages/analysis.py -- Analysis selection and chart generation page.
+==========================================================================
+
+Orchestrates the user flow between selecting analyses, configuring them,
+generating charts, and navigating to the dashboard.
+
+Flow on each rerun:
+    1. Render the analysis card grid (ANALYSIS_OPTIONS from __init__.py).
+    2. When the user clicks a card, it is added to selected_analyses.
+    3. For each selected analysis, render its config panel via render_config_panel().
+    4. "Generate Charts" button calls _run() for each selected analysis and
+       appends results to st.session_state.charts.
+    5. "Go to Dashboard" button navigates to the dashboard page.
+
+Special handling:
+    - data_quality bypasses the st.form() wrapper (listed in _NO_FORM) because
+      it contains its own st.button() widgets.
+    - descriptive renders inline via st.dataframe() and returns no charts.
+    - OUTLIER_HELP text is displayed above outlier charts.
+    - Auto-insights are generated via generate_chart_insights() after each chart.
+
+CONTRIBUTING -- after adding a new analysis type in __init__.py:
+    No changes needed here unless your analysis requires special page-level
+    handling (like data_quality does). The card grid, config panel, and chart
+    generation all read from ANALYSIS_OPTIONS and _RUNNERS automatically.
+"""
+"""
 modules/pages/analysis.py
-Two-step "Configure → Generate" flow — no st.form.
+Two-step "Configure → Generate" flow -- no st.form.
 All config widgets are reactive; options like Top N and Dual Y show/hide instantly.
 """
 
@@ -110,7 +137,7 @@ def page_analysis():
 
     if is_editing:
         sname = st.session_state.get("editing_session_name", "Session")
-        st.info(f"✏️ Edit mode — adding charts to **{sname}**. "
+        st.info(f"✏️ Edit mode -- adding charts to **{sname}**. "
                 f"Click **Proceed to Dashboard** when done.")
 
     st.markdown("## 🔬 Select Analysis Type")
@@ -150,7 +177,7 @@ def page_analysis():
         }, 150);
         </script>""", height=0)
 
-        # ── Data Quality — special case (no config needed) ────────────────────
+        # ── Data Quality -- special case (no config needed) ────────────────────
         if active in _NO_FORM:
             st.markdown(f"### 🧹 {analysis_name}")
             new_charts_raw = run_data_quality(df)
@@ -167,7 +194,7 @@ def page_analysis():
                 if st.button("✕ Close", key="dq_close"):
                     st.session_state["_active_analysis"] = None; st.rerun()
 
-        # ── Descriptive — no chart output ─────────────────────────────────────
+        # ── Descriptive -- no chart output ─────────────────────────────────────
         elif active == "descriptive":
             st.markdown("### 🗂️ Descriptive Statistics")
             run_descriptive(df)
@@ -182,12 +209,12 @@ def page_analysis():
                 if st.button("✕ Close", key="desc_close"):
                     st.session_state["_active_analysis"] = None; st.rerun()
 
-        # ── All other analysis types — two-step: configure then generate ──────
+        # ── All other analysis types -- two-step: configure then generate ──────
         else:
-            st.markdown(f"### ⚙️ Configure — {analysis_name}")
-            st.caption("Adjust options below. All selections are live — no submit needed until Generate.")
+            st.markdown(f"### ⚙️ Configure -- {analysis_name}")
+            st.caption("Adjust options below. All selections are live -- no submit needed until Generate.")
 
-            # Render config widgets (fully reactive — no form)
+            # Render config widgets (fully reactive -- no form)
             render_config_panel(active, df)
 
             st.markdown("<br>", unsafe_allow_html=True)
@@ -244,7 +271,7 @@ def _render_chart_list(charts, edit_mode=False):
     """Render chart cards with delete, insights, and notes. Title editing is in Dashboard → Chart Settings."""
     col_descs = st.session_state.get("col_descriptions", {})
     for uid, title, fig in charts:
-        # ── Compact control row (delete only — title lives inside the Plotly chart) ──
+        # ── Compact control row (delete only -- title lives inside the Plotly chart) ──
         ctrl = st.columns([11, 1])
         with ctrl[1]:
             if st.button("✕", key=f"del_{uid}", help="Remove this chart"):

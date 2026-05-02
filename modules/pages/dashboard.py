@@ -1,7 +1,36 @@
 """
+modules/pages/dashboard.py -- Dashboard view, editing, saving, and PDF export.
+==============================================================================
+
+The dashboard page has two operating modes:
+
+  Edit / Build mode (default after analysis):
+    - Shows the generated chart cards in a portrait or landscape grid.
+    - Allows adding/editing KPI cards, renaming charts, adding descriptions.
+    - "Save Session" persists charts + metadata to the sessions table.
+    - "Export PDF" calls modules/export.py to produce a downloadable report.
+    - Auto-saves progress to draft_sessions on every meaningful action.
+
+  View / Read-only mode (?sid= URL parameter):
+    - Loads a saved session's charts from the DB via get_session_charts().
+    - Renders in a read-only layout (no edit controls shown).
+    - Accessed via shared links or clicking a saved session card on home.py.
+
+Session state keys managed here:
+    charts          -- list of (uid, title, fig) tuples
+    dashboard_title -- editable title shown at the top of the dashboard
+    kpis            -- list of KPI dicts: {label, value, icon}
+    layout_mode     -- "portrait" (2-col) or "landscape" (3-col)
+    editing_session_id / editing_session_name -- set when editing a saved session
+
+CONTRIBUTING -- to add a new dashboard panel or widget:
+    Add a new st.expander() or column block in page_dashboard().
+    Call save_draft() after any state change the user should be able to recover.
+"""
+"""
 modules/pages/dashboard.py
 Clean, working dashboard with:
-  - Auto-calculated KPIs (Power BI style — from dataset)
+  - Auto-calculated KPIs (Power BI style -- from dataset)
   - Visual grid layout builder (numbered slot dropdowns, full-width toggle)
   - Per-chart settings: title, subtitle, X/Y axis labels (applied live)
   - Portrait / Landscape export
@@ -87,7 +116,7 @@ def _all_charts(viewing_saved):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# KPI Engine  (auto-calculated — Power BI style)
+# KPI Engine  (auto-calculated -- Power BI style)
 # ─────────────────────────────────────────────────────────────────────────────
 _KPI_TYPES = [
     "Total (Sum)", "Average (Mean)", "Median", "Count (Rows)",
@@ -109,7 +138,7 @@ def _calc_kpi(df, kpi_type, col=None, group_col=None, metric_col=None,
               filter_col=None, filter_val=None, label=None):
     num_c = df.select_dtypes(include="number").columns.tolist()
     icon  = _KPI_ICONS.get(kpi_type, "📊")
-    val   = "—"
+    val   = "--"
     lbl   = label or kpi_type
     pfx   = sfx = ""
     try:
@@ -185,11 +214,11 @@ def _kpi_card_html(kpi):
             f'{arrow} {abs(change_pct):.1f}% vs prior period</div>'
         )
     icon   = escape(str(kpi.get("icon", "📊")))
-    value  = escape(str(kpi.get("value", "—")))
+    value  = escape(str(kpi.get("value", "--")))
     prefix = escape(str(kpi.get("prefix", "")))
     suffix = escape(str(kpi.get("suffix", "")))
     label  = escape(str(kpi.get("label", "")))
-    # Long values (date ranges etc.) need wrapping — drop nowrap for those
+    # Long values (date ranges etc.) need wrapping -- drop nowrap for those
     full_val = f"{prefix}{value}{suffix}"
     val_style = (
         "font-size:0.95rem;font-weight:800;color:#4f6ef7;line-height:1.25;"
@@ -442,7 +471,7 @@ def _chart_settings(uid, title, fig, auto_insights, readonly):
         with a:
             sub = st.text_input("Subtitle",
                                 value=_meta(uid).get("subtitle",""),
-                                placeholder="Optional — shown below title…",
+                                placeholder="Optional -- shown below title…",
                                 key=f"sub_{uid}")
         with b:
             pass   # room for future field
@@ -502,7 +531,7 @@ def _render_chart(item, idx, total, viewing_saved):
     yl      = meta.get("y_label","")
 
     fig_show = _apply_axes(fig, xl, yl)
-    # Prepare display figure — apply axis labels and styling but do NOT embed
+    # Prepare display figure -- apply axis labels and styling but do NOT embed
     # the title inside the Plotly figure (it is rendered as a heading above the
     # chart instead, so it only appears once).
     try:
@@ -609,7 +638,7 @@ def _render_chart(item, idx, total, viewing_saved):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Grid renderer — respects grid_order and grid_fullwidth
+# Grid renderer -- respects grid_order and grid_fullwidth
 # ─────────────────────────────────────────────────────────────────────────────
 def _render_grid(ordered_charts, viewing_saved):
     total    = len(ordered_charts)
@@ -733,7 +762,7 @@ def page_dashboard():
             except Exception: st.session_state.kpis = []
         df = None  # No live df when viewing saved
     else:
-        sname = f"Analysis — {st.session_state.get('file_name','')}"
+        sname = f"Analysis -- {st.session_state.get('file_name','')}"
 
     charts = _all_charts(viewing_saved)
 
@@ -773,7 +802,7 @@ def page_dashboard():
                       horizontal=True)
         st.session_state.layout_mode = lo.lower()
 
-    # ── Save / Update — at the TOP so it's always visible ────────────────────
+    # ── Save / Update -- at the TOP so it's always visible ────────────────────
     if not viewing_saved:
         sc1, sc2, sc3 = st.columns([3,1,1])
         with sc1:

@@ -1,4 +1,35 @@
 """
+modules/ui/css.py -- Global CSS injection and shared UI components.
+===================================================================
+
+This module owns everything visual that is shared across pages:
+    - inject_css()      -- injects the full Lytrize stylesheet into the page
+    - inject_footer()   -- renders the footer bar at the bottom of every page
+    - render_logo()     -- renders the top-left logo with a home link
+    - render_page_nav() -- renders the top navigation bar (used in analysis/dashboard)
+
+CSS architecture:
+    All styles live in a single injected <style> block (no external CSS files).
+    The stylesheet uses CSS custom properties (variables) for consistent theming.
+    Glassmorphism effect (backdrop-filter: blur) is used for cards and modals.
+
+CONTRIBUTING -- to change the colour theme:
+    Edit the :root block at the top of the CSS string in inject_css().
+    All component colours reference variables from :root so a single change
+    propagates everywhere.
+
+CONTRIBUTING -- to add a new reusable UI component:
+    Add a function at the bottom of this file that returns or renders HTML/CSS.
+    Use st.markdown(..., unsafe_allow_html=True) to render HTML strings.
+    Keep component styles scoped with a unique class prefix to avoid conflicts.
+
+NOTE on unsafe_allow_html:
+    Streamlit requires unsafe_allow_html=True to inject custom HTML/CSS.
+    This is safe here because all user-supplied content is passed through
+    html.escape() before being embedded in any HTML string (see home.py,
+    analysis.py). Never embed raw user input without escaping.
+"""
+"""
 modules/ui/css.py
 Injects all global styles for Lytrize:
   - Dynamic font system that adapts to browser light/dark mode AND Streamlit theme
@@ -33,7 +64,7 @@ def inject_css():
     <style>
 
     /* ═══════════════════════════════════════════════════════════
-       FONTS — dynamic per browser theme
+       FONTS -- dynamic per browser theme
        Uses prefers-color-scheme + Streamlit CSS vars together
        so text is always readable regardless of theme.
     ═══════════════════════════════════════════════════════════ */
@@ -107,7 +138,7 @@ def inject_css():
     #MainMenu, footer, header { visibility: hidden; }
 
     /* ═══════════════════════════════════════════════════════════
-       BACKGROUND — Aurora mesh gradient
+       BACKGROUND -- Aurora mesh gradient
        Two layers: a base gradient + animated orbs via pseudo
        Adapts for light (subtle, pastel) and dark (vivid, deep)
     ═══════════════════════════════════════════════════════════ */
@@ -305,7 +336,7 @@ def inject_css():
     }
 
     /* ═══════════════════════════════════════════════════════════
-       LAYOUT FIXES — REMOVE STREAMLIT BOTTOM GAP
+       LAYOUT FIXES -- REMOVE STREAMLIT BOTTOM GAP
     ═══════════════════════════════════════════════════════════ */
     .block-container {
         padding-bottom: 0rem !important;

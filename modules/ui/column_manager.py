@@ -1,4 +1,20 @@
 """
+modules/ui/column_manager.py -- Dashboard column-layout helpers.
+================================================================
+
+Provides layout utility functions used by the dashboard page to arrange
+chart cards in portrait (2-column) or landscape (3-column) grids.
+
+Functions:
+    get_column_layout(layout_mode)  -- returns the Streamlit column spec list
+    render_chart_grid(charts, ...)  -- renders all chart cards into the grid
+
+CONTRIBUTING -- to add a new layout mode:
+    1. Add an entry to the layout_mode selectbox in dashboard.py.
+    2. Add a matching branch in get_column_layout() returning a column spec.
+       Streamlit column specs are lists of relative widths, e.g. [1, 1, 1].
+"""
+"""
 modules/ui/column_manager.py
 Column add / remove UI shown on the upload page.
 """

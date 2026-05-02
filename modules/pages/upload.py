@@ -1,4 +1,26 @@
 """
+modules/pages/upload.py -- File upload and column classification page.
+======================================================================
+
+Handles the full data ingestion pipeline:
+    1. File upload (CSV or Excel via st.file_uploader)
+    2. For Excel: multi-sheet browser / unified table builder (excel_loader.py)
+    3. For CSV: direct pandas read_csv into session_state.df
+    4. Data-type inspection and transformation (column_tools.py)
+    5. Column classification (numeric / categorical / date-time)
+    6. "Confirm & Proceed to Analysis" button → navigates to analysis page
+
+Bug fix applied:
+    _clear_excel_state("") -- the original condition not k.endswith("") was
+    always False, so calling with no argument never cleared any state.
+    Fixed by adding: not new_file_name or not k.endswith(new_file_name)
+
+CONTRIBUTING -- to add a new file type:
+    Add a branch after the `is_excel()` check in page_upload().
+    Read the file into a pandas DataFrame and write it to st.session_state.df.
+    Then call _show_analysis_pipeline(df, filename) to continue the normal flow.
+"""
+"""
 modules/pages/upload.py
 File upload & pre-processing page.
 Fixes:
@@ -39,7 +61,7 @@ def page_upload():
     if "editing_session_id" in st.session_state:
         fname = st.session_state.get("editing_file_name", "the original file")
         st.info(
-            f"✏️ **Edit mode** — re-upload **{fname}** to add more charts to the saved session. "
+            f"✏️ **Edit mode** -- re-upload **{fname}** to add more charts to the saved session. "
             f"Your existing charts are preserved.")
 
     uploaded = st.file_uploader(
@@ -85,7 +107,7 @@ def page_upload():
             st.markdown(
                 '<div style="background:rgba(16,185,129,0.10);border:1px solid rgba(16,185,129,0.25);'
                 'border-radius:12px;padding:0.8rem 1.1rem;margin-bottom:1rem;">'
-                '&#127775; <b>Star schema active</b> — '
+                '&#127775; <b>Star schema active</b> -- '
                 f'Fact: <b>{safe_fact}</b> joined with '
                 + ", ".join(f"<b>{d}</b>" for d in safe_dims) +
                 f' &nbsp;·&nbsp; {schema_info["shape"][0]:,} rows x {schema_info["shape"][1]} cols'
@@ -107,14 +129,14 @@ def page_upload():
 
 def _show_analysis_pipeline(df: pd.DataFrame, file_name: str):
     st.markdown("---")
-    st.success(f"✅ **{file_name}** — {df.shape[0]:,} rows × {df.shape[1]} columns")
+    st.success(f"✅ **{file_name}** -- {df.shape[0]:,} rows × {df.shape[1]} columns")
     st.dataframe(df.head(), use_container_width=True)
 
     df = show_column_manager(df)
     df = show_dtype_transformer(df)
     show_column_classifier(df)
 
-    with st.expander("📖 Describe Your Columns (optional — improves auto-insights)", expanded=False):
+    with st.expander("📖 Describe Your Columns (optional -- improves auto-insights)", expanded=False):
         st.markdown(
             "Describe what each column means. These appear in chart insights "
             "to give context-aware observations. Leave blank to skip."
@@ -133,6 +155,17 @@ def _show_analysis_pipeline(df: pd.DataFrame, file_name: str):
 
 
 def _clear_excel_state(new_file_name: str = ""):
+    """
+    Remove all _xl_sheets_* keys from session_state that don't belong to new_file_name.
+
+    When called with no argument (CSV upload replacing Excel), new_file_name is ""
+    and every key starting with _xl_sheets_ must be removed.
+
+    FIX: The original condition  `not k.endswith("")`  is always False (every
+    string ends with ""), so calling _clear_excel_state() with no argument was
+    a no-op. The guard `not new_file_name` now ensures all keys are cleared
+    when switching away from an Excel file entirely.
+    """
     keys_to_delete = [
         k for k in list(st.session_state.keys())
         if k.startswith("_xl_sheets_") and (not new_file_name or not k.endswith(new_file_name))

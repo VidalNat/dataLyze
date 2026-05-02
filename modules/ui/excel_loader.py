@@ -1,12 +1,43 @@
 """
+modules/ui/excel_loader.py -- Excel multi-sheet browser and unified table builder.
+==================================================================================
+
+Handles Excel files (.xlsx / .xls) uploaded on the upload page.
+
+Two modes:
+
+  Sheet browser mode (default):
+      Renders a tab per sheet. The user picks the sheet they want to analyse,
+      which is loaded into st.session_state.df.
+
+  Unified table mode (optional):
+      Lets the user select multiple sheets and stack them vertically into one
+      DataFrame. Useful for "monthly sheets" style workbooks where each sheet
+      has the same columns but different rows.
+
+Session state keys managed here (all prefixed _xl_):
+    _xl_sheets_{filename}    -- dict of {sheet_name: DataFrame}
+    _unified_table_info      -- metadata about the current unified table
+
+These keys are cleared by _clear_excel_state() in upload.py whenever the
+active file changes, so stale sheet data from a previous upload never bleeds
+into a new one.
+
+CONTRIBUTING -- to support a new Excel feature (e.g. named ranges):
+    Add a new expander inside show_excel_loader() after the unified table section.
+    Read data from the openpyxl workbook (available via pd.ExcelFile) and
+    write the result into st.session_state.df using the same pattern as
+    the existing sheet / unified table loaders.
+"""
+"""
 modules/ui/excel_loader.py
 
 Handles Excel files with multiple sheets. Gives the user two paths:
 
-PATH A — Single Sheet
+PATH A -- Single Sheet
     Browse all sheets with previews, pick one, proceed as normal.
 
-PATH B — Unified Table builder
+PATH B -- Unified Table builder
     Pick a Fact table sheet + Dimension table sheets, map join keys
     between each Dim and the Fact, choose join type, then merge everything
     into one flat DataFrame that feeds into the standard analysis pipeline.
@@ -77,7 +108,7 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
     sheet_names = list(sheets.keys())
 
     if len(sheet_names) == 1:
-        # Only one sheet — just load it, nothing to choose
+        # Only one sheet -- just load it, nothing to choose
         st.info(f"📋 Single sheet detected: **{sheet_names[0]}**")
         return sheets[sheet_names[0]]
 
@@ -112,7 +143,7 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
     )
 
     # ═════════════════════════════════════════════════════════════════════════
-    # PATH A — Single sheet picker
+    # PATH A -- Single sheet picker
     # ═════════════════════════════════════════════════════════════════════════
     if "single sheet" in mode:
         st.markdown("#### Select a sheet")
@@ -123,7 +154,7 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
         )
         df_preview = sheets[selected]
 
-        with st.expander(f"👁️ Preview — {selected}  ({_shape_tag(df_preview)})", expanded=True):
+        with st.expander(f"👁️ Preview -- {selected}  ({_shape_tag(df_preview)})", expanded=True):
             st.dataframe(df_preview.head(10), use_container_width=True)
 
         if st.button("✅ Use this sheet →", key="_xl_confirm_single"):
@@ -133,27 +164,27 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
         return None   # waiting for user to confirm
 
     # ═════════════════════════════════════════════════════════════════════════
-    # PATH B — Multi-table join
+    # PATH B -- Multi-table join
     # ═════════════════════════════════════════════════════════════════════════
     st.markdown("---")
     st.markdown("### 🔗 Unified Table Builder")
     st.markdown(
         "Merge all your sheets into one comprehensive table. Perfect for analyzing related data across multiple sheets without complex joins. "
-        "Step 1 — Select your Base table "
+        "Step 1 -- Select your Base table "
         "This table will be the foundation. We'll attach other sheets to it automatically."
     )
 
-    # Step 1 — Pick fact table
-    st.markdown("#### Step 1 — Choose your Fact table")
+    # Step 1 -- Pick fact table
+    st.markdown("#### Step 1 -- Choose your Fact table")
     st.caption("TThe Base table is your main dataset with unique metrics like (transactions, records, events etc). Other sheets will be merged into this table. It's usually the largest or most central sheet.")
     fact_name = st.selectbox("Fact table sheet:", sheet_names, key="_xl_fact")
     fact_df   = sheets[fact_name]
 
-    with st.expander(f"👁️ Base table preview — {fact_name}  ({_shape_tag(fact_df)})", expanded=False):
+    with st.expander(f"👁️ Base table preview -- {fact_name}  ({_shape_tag(fact_df)})", expanded=False):
         st.dataframe(fact_df.head(8), use_container_width=True)
 
-    # Step 2 — Pick dimension tables
-    st.markdown("#### Step 2 — Choose Dimension tables to join")
+    # Step 2 -- Pick dimension tables
+    st.markdown("#### Step 2 -- Choose Dimension tables to join")
     st.caption("Pick sheets to combine with your Primary table. We'll automatically link them together using matching columns to create one complete dataset.")
     dim_options = [s for s in sheet_names if s != fact_name]
     selected_dims = st.multiselect(
@@ -166,8 +197,8 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
         st.info("Select at least one Additional table to continue.")
         return None
 
-    # Step 3 — Configure join for each dim
-    st.markdown("#### Step 3 — Map join keys")
+    # Step 3 -- Configure join for each dim
+    st.markdown("#### Step 3 -- Map join keys")
     st.caption(
         "For each additional table, select the column that matches your Primary table. "
         "We'll use these shared columns to correctly merge your datasets."
@@ -224,11 +255,11 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
         unmatched = len(fact_vals - dim_vals)
 
         if match_pct == 100:
-            st.success(f"✅ 100% key match — all Fact rows will join successfully.")
+            st.success(f"✅ 100% key match -- all Fact rows will join successfully.")
         elif match_pct >= 70:
-            st.warning(f"⚠️ {match_pct:.0f}% key match — {unmatched:,} Fact rows have no matching Dim record (will be null on left join).")
+            st.warning(f"⚠️ {match_pct:.0f}% key match -- {unmatched:,} Fact rows have no matching Dim record (will be null on left join).")
         else:
-            st.error(f"❌ Only {match_pct:.0f}% key match — check that you selected the right columns.")
+            st.error(f"❌ Only {match_pct:.0f}% key match -- check that you selected the right columns.")
 
         # Columns to bring from dim (exclude the join key to avoid duplication)
         with st.expander(f"📋 Choose columns to import from {dim_name}", expanded=False):
@@ -253,9 +284,9 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
     if not all_valid:
         return None
 
-    # Step 4 — Schema diagram (text representation)
+    # Step 4 -- Schema diagram (text representation)
     st.markdown("---")
-    st.markdown("#### Step 4 — Unifier summary")
+    st.markdown("#### Step 4 -- Unifier summary")
 
     schema_lines = [f"**FACT:** 📊 {fact_name}  ({_shape_tag(fact_df)})"]
     for cfg in join_configs:
@@ -306,7 +337,7 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
 
                 after = len(merged)
                 merge_log.append(
-                    f"✅ Joined **{cfg['dim_name']}** ({cfg['join_type']}) — "
+                    f"✅ Joined **{cfg['dim_name']}** ({cfg['join_type']}) -- "
                     f"{before:,} → {after:,} rows, +{len(cfg['cols_to_bring'])} columns"
                 )
 
@@ -315,7 +346,7 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
             st.markdown(f"- {entry}")
 
         st.success(
-            f"✅ Unified Table built — **{merged.shape[0]:,} rows × {merged.shape[1]} columns** "
+            f"✅ Unified Table built -- **{merged.shape[0]:,} rows × {merged.shape[1]} columns** "
             f"ready for analysis."
         )
         #st.dataframe(merged.head(10), use_container_width=True)

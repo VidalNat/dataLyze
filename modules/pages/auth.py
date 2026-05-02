@@ -1,5 +1,24 @@
 """
-modules/pages/auth.py — Login & Registration page.
+modules/pages/auth.py -- Login, registration, and profile management page.
+==========================================================================
+
+Exposes two entry-point functions called by app.py:
+    page_auth()    -- sign-in / sign-up form for unauthenticated users
+    page_profile() -- account settings, password change, account deletion
+
+Authentication flow:
+    1. User submits credentials → login_user() validates them.
+    2. On success, create_token() issues a 7-day persistent token.
+    3. The token is written to ?t= in the URL via st.query_params.
+    4. Every subsequent page load validates the token via validate_token().
+    5. Sign-out calls revoke_token() and clears session_state.
+
+CONTRIBUTING -- to add a new profile setting:
+    Add a new st.expander() block in page_profile() below the existing sections.
+    Use the same confirm-before-action pattern as the account deletion block.
+"""
+"""
+modules/pages/auth.py -- Login & Registration page.
 Logo is text-only here per spec (#10).
 """
 
@@ -99,7 +118,7 @@ def page_auth():
 
 
 def page_profile():
-    """User profile page — account info and danger-zone actions."""
+    """User profile page -- account info and danger-zone actions."""
     from modules.ui.css import render_logo
     render_logo()
 
@@ -110,7 +129,7 @@ def page_profile():
     username = st.session_state.get("username", "")
     user_id  = st.session_state.get("user_id")
 
-    st.markdown(f"## 👤 Profile — {username}")
+    st.markdown(f"## 👤 Profile -- {username}")
     st.markdown("---")
 
     # ── Danger Zone ───────────────────────────────────────────────────────────
@@ -154,7 +173,7 @@ def page_profile():
                     st.success("Your account has been deleted.")
                     st.rerun()
                 else:
-                    st.error("Something went wrong — account could not be deleted. Try again.")
+                    st.error("Something went wrong -- account could not be deleted. Try again.")
         with col_no:
             if st.button("✗ Cancel", use_container_width=True):
                 st.session_state.confirm_delete_account = False

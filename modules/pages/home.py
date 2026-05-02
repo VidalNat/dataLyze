@@ -1,6 +1,20 @@
 """
-modules/pages/home.py — Home dashboard page.
-Fixes: Lytrize logo at top with home link (#10)
+modules/pages/home.py -- Home / dashboard overview page.
+=========================================================
+
+Shown after login. Displays:
+  - Welcome banner with the user's name
+  - KPI cards: saved sessions count, total charts, available analysis types
+  - Grid of saved session cards with rename / delete / open / resume actions
+  - Footer
+
+Bug fix applied:
+    The "Available analysis" KPI card previously showed the hardcoded number 9.
+    It now uses len(ANALYSIS_OPTIONS) so it stays accurate automatically.
+
+CONTRIBUTING -- to add a new KPI card to this page:
+    Add an HTML string to the `kpi_row` list in page_home() using the
+    .kpi-card / .kpi-icon / .kpi-val / .kpi-lbl CSS classes from ui/css.py.
 """
 
 import streamlit as st
@@ -33,7 +47,7 @@ def page_home():
             st.session_state.page = "profile"
             st.rerun()
     with lc3:
-        if st.button("Logout"):
+        if st.button("📤 Logout"):
             tok = st.query_params.get("t", "")
             if tok: revoke_token(tok)
             log_activity(st.session_state.get("user_id", 0), "logout")

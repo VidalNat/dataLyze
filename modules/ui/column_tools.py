@@ -1,4 +1,35 @@
 """
+modules/ui/column_tools.py -- Column type classification and data transformation UI.
+====================================================================================
+
+Provides two main UI components used on the upload page:
+
+  show_column_classifier(df):
+      Renders a table where the user confirms or overrides the auto-detected
+      type of each column (Numeric / Categorical / Date-Time / Ignore).
+      After confirmation, writes the classified lists to session_state:
+          st.session_state.num_cols  -- list of confirmed numeric columns
+          st.session_state.cat_cols  -- list of confirmed categorical columns
+          st.session_state.dt_cols   -- list of confirmed date/time columns
+      These are the definitive column lists used by ALL analysis runners.
+
+  show_data_transform_tools(df):
+      Optional transformation panel with actions like:
+          - Drop a column permanently
+          - Rename a column
+          - Fill NA values with mean / mode / a custom string
+          - Cast a column to a different dtype
+      Each action mutates st.session_state.df in-place and calls st.rerun().
+
+CONTRIBUTING -- to add a new transformation tool:
+    Add a new tab or expander inside show_data_transform_tools() below the
+    existing actions. Follow the same pattern:
+        1. UI widgets to configure the action.
+        2. A button to confirm it.
+        3. Mutate st.session_state.df in-place.
+        4. Call st.rerun() to refresh the display.
+"""
+"""
 modules/ui/column_tools.py
 Data-type transformer and column classifier widgets shown on the upload page.
 """
@@ -48,7 +79,7 @@ def show_dtype_transformer(df):
                     converted = pd.to_datetime(df[col_to_convert], errors='coerce').dt.date
 
                 elif new_dtype == "time":
-                    # Fully vectorised — prepend dummy date so pd.to_datetime can
+                    # Fully vectorised -- prepend dummy date so pd.to_datetime can
                     # parse pure time strings like "07:06:11", then store as "HH:MM:SS"
                     # strings (avoids Streamlit serialisation issues with time objects).
                     src = df[col_to_convert].astype(str).str.strip()
@@ -147,7 +178,7 @@ def show_column_classifier(df):
             st.session_state.cat_cols = confirmed_cat
             st.session_state.dt_cols  = confirmed_dt
             st.session_state.page     = "analysis"
-            # Only reset charts when NOT in edit mode — preserve saved charts
+            # Only reset charts when NOT in edit mode -- preserve saved charts
             if "editing_session_id" not in st.session_state:
                 st.session_state.charts   = []
                 st.session_state.selected_analyses = []
