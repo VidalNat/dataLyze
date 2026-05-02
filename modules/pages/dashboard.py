@@ -916,7 +916,7 @@ def _export_row(charts, sname, viewing_saved):
     with e2:
         pk = f"pdf_{sname}"
         if st.button("📄 Generate PDF", key="gen_pdf", use_container_width=True):
-            with st.spinner("Preparing PDF engine (first run only)…"):
+            with st.spinner("Preparing PDF engine …"):
                 try:
                     st.session_state[pk] = generate_pdf_report(
                         export_charts, sname, orientation=orient,

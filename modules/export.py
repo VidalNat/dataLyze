@@ -355,13 +355,29 @@ def generate_pdf_report(charts, session_name, orientation="portrait",
         vp_width = 1400 if is_landscape else 1100
         page = browser.new_page(viewport={"width": vp_width, "height": 5000})
 
-        # networkidle waits for Plotly CDN + initial render.
+        # Step 1 — networkidle: JS is parsed, initial layout pass done.
         page.set_content(html_content, wait_until="networkidle", timeout=60_000)
 
-        # Extra settle for Plotly's deferred relayoutAll (+200 ms after load).
-        page.wait_for_timeout(2_500)
+        # Step 2 — wait until EVERY Plotly chart has produced its <svg>.
+        # This is the key fix: a fixed sleep misses slow-rendering charts;
+        # polling the DOM catches them all regardless of count or complexity.
+        page.wait_for_function(
+            """() => {
+                const plots = document.querySelectorAll('.js-plotly-plot');
+                if (plots.length === 0) return true;
+                return Array.from(plots).every(
+                    p => p.querySelector('svg.main-svg') !== null
+                );
+            }""",
+            timeout=30_000,
+        )
 
-        # Measure the true rendered height of the whole document.
+        # Step 3 — scroll to bottom so any deferred/lazy layout is triggered,
+        # then give Plotly's relayoutAll a moment to finish resizing.
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(1_500)
+
+        # Step 4 — measure the true rendered height of the whole document.
         # We use this to create a single-page PDF sized to fit all content
         # exactly — no blank first page, no overflow pages.
         dims = page.evaluate("""() => ({
