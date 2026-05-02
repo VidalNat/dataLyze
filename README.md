@@ -38,8 +38,6 @@ Everything else lives in the **[project Wiki](../../wiki)**:
 |---|---|
 | [Home](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki) | Project overview & feature list |
 | [Getting Started](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki/Getting-started) | Install, run, first use walkthrough |
-| [Project Structure](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki/Project-structure) | Every file explained |
-| [Adding an Analysis Module](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki/Adding-an-analysis-module) | How to contribute a new chart type |
 | [Configuration](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki/Configuration) | PostgreSQL, environment variables |
 | [Contributing Guide](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki/Contributing-guide) | Workflow, PR checklist, conventions |
 | [Roadmap](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki/Roadmap) | Planned features & ideas |
