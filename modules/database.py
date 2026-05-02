@@ -1,793 +1,966 @@
 """
-modules/database.py -- All database operations for Lytrize.
-============================================================
+modules/pages/dashboard.py -- Dashboard view, editing, saving, and PDF export.
+==============================================================================
 
-Handles: schema creation, authentication, session CRUD, token management,
-activity logging, and draft session persistence.
+The dashboard page has two operating modes:
 
-──────────────────────────────────────────────────────────────────────────────
-DATABASE BACKEND
-──────────────────────────────────────────────────────────────────────────────
-Default: SQLite file at  lytrize.db  (or $DATALYZE_DB_PATH).
-Postgres: set DATABASE_URL=postgresql://user:pass@host/dbname in the environment.
-          Requires: pip install psycopg2-binary
+  Edit / Build mode (default after analysis):
+    - Shows the generated chart cards in a portrait or landscape grid.
+    - Allows adding/editing KPI cards, renaming charts, adding descriptions.
+    - "Save Session" persists charts + metadata to the sessions table.
+    - "Export PDF" calls modules/export.py to produce a downloadable report.
+    - Auto-saves progress to draft_sessions on every meaningful action.
 
-The module abstracts the backend difference with three helpers:
-    _connect()  -- returns a new connection for either backend
-    _ph(sql)    -- swaps ? → %s for Postgres
-    _last_id(c) -- gets the last inserted row ID in a backend-agnostic way
+  View / Read-only mode (?sid= URL parameter):
+    - Loads a saved session's charts from the DB via get_session_charts().
+    - Renders in a read-only layout (no edit controls shown).
+    - Accessed via shared links or clicking a saved session card on home.py.
 
-──────────────────────────────────────────────────────────────────────────────
-SCHEMA OVERVIEW
-──────────────────────────────────────────────────────────────────────────────
-  users            -- registered accounts
-  sessions         -- saved analysis dashboards
-  user_activity    -- append-only audit log
-  login_tokens     -- persistent login tokens (7-day expiry)
-  draft_sessions   -- auto-saved in-progress work (one row per user)
+Session state keys managed here:
+    charts          -- list of (uid, title, fig) tuples
+    dashboard_title -- editable title shown at the top of the dashboard
+    kpis            -- list of KPI dicts: {label, value, icon}
+    layout_mode     -- "portrait" (2-col) or "landscape" (3-col)
+    editing_session_id / editing_session_name -- set when editing a saved session
 
-──────────────────────────────────────────────────────────────────────────────
-PASSWORD SECURITY
-──────────────────────────────────────────────────────────────────────────────
-New passwords: PBKDF2-HMAC-SHA256, 260,000 iterations, random per-user salt.
-Stored as:     "<salt>$<hex-digest>"
-Legacy hashes: bare SHA-256 (no salt) -- still accepted, upgraded on next login.
-
-──────────────────────────────────────────────────────────────────────────────
-CONTRIBUTING -- adding a new table
-──────────────────────────────────────────────────────────────────────────────
-  1. Add CREATE TABLE IF NOT EXISTS blocks in init_db() for BOTH the _PG
-     and SQLite branches -- keep the schemas in sync.
-  2. Add CRUD functions below with clear docstrings.
-  3. Import new functions in the page(s) that need them.
-  4. Never call st.* in this module -- it is a pure data layer.
-
-Bug fixes applied:
-  - delete_user_db(): removed log_activity() call after user is deleted
-    (the user FK no longer exists -- writing to user_activity would fail).
-  - SQLite sessions table: added dashboard_title, kpis_json, layout_mode
-    directly in CREATE TABLE (the ALTER TABLE migrations remain for existing DBs).
+CONTRIBUTING -- to add a new dashboard panel or widget:
+    Add a new st.expander() or column block in page_dashboard().
+    Call save_draft() after any state change the user should be able to recover.
+"""
+"""
+modules/pages/dashboard.py
+Clean, working dashboard with:
+  - Auto-calculated KPIs (Power BI style -- from dataset)
+  - Visual grid layout builder (numbered slot dropdowns, full-width toggle)
+  - Per-chart settings: title, subtitle, X/Y axis labels (applied live)
+  - Portrait / Landscape export
+  - Insights & notes displayed correctly
 """
 
-import json
-import uuid
-import os
-import hashlib
-import hmac
-import datetime
-from typing import Optional
+import json, copy, datetime
+import pandas as pd
+import streamlit as st
+from html import escape
+import re
 
-# ── Environment configuration ─────────────────────────────────────────────────
-# Override DB_PATH via DATALYZE_DB_PATH env var to point at a custom SQLite file.
-# Override to Postgres by setting DATABASE_URL to a postgresql:// URI.
-DB_PATH = os.environ.get("DATALYZE_DB_PATH", "lytrize.db")
-DB_URL  = os.environ.get("DATABASE_URL", "")
-_PG     = DB_URL.startswith(("postgresql://", "postgres://"))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Backend-agnostic connection helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _connect():
-    """
-    Return a new database connection for the configured backend.
-
-    For Postgres, autocommit is disabled so all writes require an explicit
-    conn.commit(). For SQLite, check_same_thread=False allows the connection
-    to be used from Streamlit's multi-threaded runner.
-    """
-    if _PG:
-        import psycopg2
-        conn = psycopg2.connect(DB_URL)
-        conn.autocommit = False
-        return conn
-    else:
-        import sqlite3
-        return sqlite3.connect(DB_PATH, check_same_thread=False)
-
-
-def _ph(sql: str) -> str:
-    """
-    Translate SQLite-style ? placeholders to Postgres %s placeholders.
-
-    Call this on every parameterised query string:
-        conn.execute(_ph("SELECT * FROM users WHERE id=?"), (uid,))
-    """
-    if _PG:
-        import re
-        return re.sub(r"\?", "%s", sql)
-    return sql
-
-
-def _last_id(cursor) -> int:
-    """Return the last auto-generated row ID in a backend-agnostic way."""
-    if _PG:
-        cursor.execute("SELECT lastval()")
-        return cursor.fetchone()[0]
-    return cursor.lastrowid
+from modules.database import (
+    validate_token, log_activity,
+    save_session_db, update_session_db,
+    get_session_charts, get_session_meta,
+    clear_draft, save_draft,
+)
+from modules.charts import charts_to_json, clean_insight_text, _fmt_num
+from modules.export import generate_html_report, generate_pdf_report
+from modules.ui.css import inject_footer, render_logo
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Schema -- CREATE IF NOT EXISTS
+# Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-
-def init_db() -> None:
-    """
-    Create all required tables if they do not already exist.
-
-    Safe to call on every app startup -- all statements use IF NOT EXISTS.
-    For SQLite, also runs ALTER TABLE migrations to add columns introduced
-    in later versions (so existing databases are upgraded automatically).
-
-    Called once in app.py before any page is rendered.
-    """
-    conn = _connect()
-    c    = conn.cursor()
-
-    if _PG:
-        # ── PostgreSQL schema ─────────────────────────────────────────────────
-        c.execute("""CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username TEXT UNIQUE NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-
-        c.execute("""CREATE TABLE IF NOT EXISTS sessions (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            session_name TEXT NOT NULL,
-            file_name TEXT,
-            rows_count INTEGER,
-            cols_count INTEGER,
-            analysis_types TEXT,
-            charts_json TEXT,
-            dashboard_title TEXT DEFAULT '',
-            kpis_json TEXT DEFAULT '[]',
-            layout_mode TEXT DEFAULT 'portrait',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id))""")
-
-        c.execute("""CREATE TABLE IF NOT EXISTS user_activity (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            session_id INTEGER,
-            action_type TEXT NOT NULL,
-            action_detail TEXT,
-            ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-
-        c.execute("""CREATE TABLE IF NOT EXISTS login_tokens (
-            token TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            username TEXT NOT NULL,
-            expires_at TIMESTAMP NOT NULL)""")
-
-        c.execute("""CREATE TABLE IF NOT EXISTS draft_sessions (
-            user_id INTEGER PRIMARY KEY,
-            page TEXT DEFAULT 'home',
-            charts_json TEXT DEFAULT '[]',
-            file_name TEXT DEFAULT '',
-            editing_session_id INTEGER,
-            editing_session_name TEXT,
-            dashboard_title TEXT DEFAULT '',
-            kpis_json TEXT DEFAULT '[]',
-            chart_meta_json TEXT DEFAULT '{}',
-            layout_mode TEXT DEFAULT 'portrait',
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id))""")
-
-    else:
-        # ── SQLite schema ─────────────────────────────────────────────────────
-        import sqlite3
-
-        c.execute("""CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-
-        # FIX: dashboard_title, kpis_json, layout_mode are now included in the
-        # initial CREATE TABLE statement (they were previously only added via
-        # ALTER TABLE, which meant fresh databases were inconsistent with Postgres).
-        c.execute("""CREATE TABLE IF NOT EXISTS sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            session_name TEXT NOT NULL,
-            file_name TEXT,
-            rows_count INTEGER,
-            cols_count INTEGER,
-            analysis_types TEXT,
-            charts_json TEXT,
-            dashboard_title TEXT DEFAULT '',
-            kpis_json TEXT DEFAULT '[]',
-            layout_mode TEXT DEFAULT 'portrait',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id))""")
-
-        c.execute("""CREATE TABLE IF NOT EXISTS user_activity (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            session_id INTEGER,
-            action_type TEXT NOT NULL,
-            action_detail TEXT,
-            ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-
-        c.execute("""CREATE TABLE IF NOT EXISTS login_tokens (
-            token TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            username TEXT NOT NULL,
-            expires_at TIMESTAMP NOT NULL)""")
-
-        c.execute("""CREATE TABLE IF NOT EXISTS draft_sessions (
-            user_id INTEGER PRIMARY KEY,
-            page TEXT DEFAULT 'home',
-            charts_json TEXT DEFAULT '[]',
-            file_name TEXT DEFAULT '',
-            editing_session_id INTEGER,
-            editing_session_name TEXT,
-            dashboard_title TEXT DEFAULT '',
-            kpis_json TEXT DEFAULT '[]',
-            chart_meta_json TEXT DEFAULT '{}',
-            layout_mode TEXT DEFAULT 'portrait',
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id))""")
-
-        # Migrate existing SQLite databases that pre-date these columns.
-        # Errors are silently ignored -- the column already exists in that case.
-        for col_def in [
-            "ALTER TABLE sessions ADD COLUMN dashboard_title TEXT DEFAULT ''",
-            "ALTER TABLE sessions ADD COLUMN kpis_json TEXT DEFAULT '[]'",
-            "ALTER TABLE sessions ADD COLUMN layout_mode TEXT DEFAULT 'portrait'",
-        ]:
-            try:
-                c.execute(col_def)
-            except Exception:
-                pass  # Column already exists -- safe to ignore.
-
-    conn.commit()
-    conn.close()
+def _persist():
+    uid = st.session_state.get("user_id")
+    if not uid:
+        return
+    save_draft(
+        user_id              = uid,
+        page                 = "dashboard",
+        charts_json          = charts_to_json(st.session_state.get("charts", [])),
+        file_name            = st.session_state.get("file_name", ""),
+        editing_session_id   = st.session_state.get("editing_session_id"),
+        editing_session_name = st.session_state.get("editing_session_name"),
+        dashboard_title      = st.session_state.get("dashboard_title", ""),
+        kpis_json            = json.dumps(st.session_state.get("kpis", [])),
+        chart_meta_json      = json.dumps(
+            {k: v for k, v in st.session_state.items() if k.startswith("chart_meta_")}),
+        layout_mode          = st.session_state.get("layout_mode", "portrait"),
+    )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Password hashing
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _hash(pw: str, salt: Optional[str] = None) -> str:
-    """
-    Hash a password using PBKDF2-HMAC-SHA256 with a random per-user salt.
-
-    Args:
-        pw:   Plain-text password.
-        salt: Hex string. If None, a fresh random salt is generated.
-
-    Returns:
-        "<salt>$<hex-digest>" -- stored in users.password_hash.
-    """
-    if salt is None:
-        salt = uuid.uuid4().hex  # 32-char random hex salt.
-    dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 260_000)
-    return f"{salt}${dk.hex()}"
+def _meta(uid):
+    k = f"chart_meta_{uid}"
+    if k not in st.session_state:
+        st.session_state[k] = {}
+    return st.session_state[k]
 
 
-def _verify(pw: str, stored: str) -> bool:
-    """
-    Verify a plain-text password against a stored hash.
-
-    Supports both the new salted format ("salt$hash") and the legacy bare
-    SHA-256 format (no salt) so old accounts continue to work.
-
-    Uses hmac.compare_digest to prevent timing attacks.
-    """
-    if "$" in stored:
-        salt, _ = stored.split("$", 1)
-        return hmac.compare_digest(_hash(pw, salt), stored)
-    # Legacy format: bare sha256 without salt.
-    return hmac.compare_digest(hashlib.sha256(pw.encode()).hexdigest(), stored)
+def _set_meta(uid, **kw):
+    k = f"chart_meta_{uid}"
+    if k not in st.session_state:
+        st.session_state[k] = {}
+    st.session_state[k].update(kw)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Activity logging
-# ─────────────────────────────────────────────────────────────────────────────
-
-def log_activity(user_id: int, action_type: str, detail: str = "",
-                 session_id=None) -> None:
-    """
-    Append an event to the user_activity audit log.
-
-    Silently no-ops on any error so logging failures never crash the app.
-    Truncates detail to 1000 characters to protect against oversized strings.
-
-    Args:
-        user_id:     The acting user's DB ID.
-        action_type: Short event type string (e.g. "dashboard_saved").
-        detail:      Optional human-readable detail string.
-        session_id:  Optional related session ID.
-    """
+def _apply_axes(fig, x_lbl, y_lbl):
+    if not x_lbl and not y_lbl:
+        return fig
     try:
-        conn = _connect()
-        conn.execute(
-            _ph("INSERT INTO user_activity "
-                "(user_id, session_id, action_type, action_detail) "
-                "VALUES (?,?,?,?)"),
-            (user_id, session_id, action_type, str(detail)[:1000]))
-        conn.commit()
-        conn.close()
+        f2 = copy.deepcopy(fig)
+        if x_lbl: f2.update_xaxes(title_text=x_lbl)
+        if y_lbl: f2.update_yaxes(title_text=y_lbl)
+        return f2
     except Exception:
-        pass
+        return fig
+
+
+def _all_charts(viewing_saved):
+    if viewing_saved:
+        return st.session_state.get("_view_charts", [])
+    out = []
+    for uid, title, fig in st.session_state.get("charts", []):
+        desc   = st.session_state.get(f"desc_{uid}", "")
+        autos  = st.session_state.get(f"auto_insights_{uid}", [])
+        ctype  = st.session_state.get(f"chart_type_{uid}", "")
+        meta   = _meta(uid)
+        out.append((uid, title, fig, desc, autos, ctype, meta))
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Authentication
+# KPI Engine  (auto-calculated -- Power BI style)
 # ─────────────────────────────────────────────────────────────────────────────
+_KPI_TYPES = [
+    "Total (Sum)", "Average (Mean)", "Median", "Count (Rows)",
+    "Minimum Value", "Maximum Value",
+    "% of Total (category share)", "Unique Values Count",
+    "Date Range", "Top Category → Value", "Bottom Category → Value",
+    "% Change (Latest Month vs Prev Month)", "% Change (Latest Year vs Prev Year)",
+]
+_KPI_ICONS = {
+    "Total (Sum)":"💰","Average (Mean)":"📊","Median":"📐","Count (Rows)":"🔢",
+    "Minimum Value":"⬇️","Maximum Value":"⬆️",
+    "% of Total (category share)":"📈","Unique Values Count":"🔍",
+    "Date Range":"📅","Top Category → Value":"🏆","Bottom Category → Value":"📉",
+    "% Change (Latest Month vs Prev Month)":"📅","% Change (Latest Year vs Prev Year)":"📅",
+}
 
-def register_user(username: str, email: str, password: str):
-    """
-    Create a new user account.
 
-    Returns:
-        (True, "Account created!")       on success.
-        (False, "<reason>")              on failure.
-
-    Unique constraint violations on username and email are caught and returned
-    as user-friendly messages rather than raw SQL errors.
-    """
-    conn = _connect()
+def _calc_kpi(df, kpi_type, col=None, group_col=None, metric_col=None,
+              filter_col=None, filter_val=None, label=None):
+    num_c = df.select_dtypes(include="number").columns.tolist()
+    icon  = _KPI_ICONS.get(kpi_type, "📊")
+    val   = "--"
+    lbl   = label or kpi_type
+    pfx   = sfx = ""
     try:
-        conn.execute(
-            _ph("INSERT INTO users (username, email, password_hash) VALUES (?,?,?)"),
-            (username, email, _hash(password)))
-        conn.commit()
-        return True, "Account created!"
+        if kpi_type == "Total (Sum)" and col in num_c:
+            v = df[col].sum()
+            val = _fmt_num(v)
+            lbl = label or f"Total {col}"
+        elif kpi_type == "Average (Mean)" and col in num_c:
+            val = _fmt_num(df[col].mean()); lbl = label or f"Avg {col}"
+        elif kpi_type == "Median" and col in num_c:
+            val = _fmt_num(df[col].median()); lbl = label or f"Median {col}"
+        elif kpi_type == "Count (Rows)":
+            val = _fmt_num(len(df)); lbl = label or "Total Records"
+        elif kpi_type == "Minimum Value" and col in num_c:
+            val = _fmt_num(df[col].min()); lbl = label or f"Min {col}"
+        elif kpi_type == "Maximum Value" and col in num_c:
+            val = _fmt_num(df[col].max()); lbl = label or f"Max {col}"
+        elif kpi_type == "Unique Values Count" and col:
+            val = _fmt_num(df[col].nunique()); lbl = label or f"Unique {col}"
+        elif kpi_type == "Date Range" and col:
+            dates = pd.to_datetime(df[col], errors="coerce").dropna()
+            if len(dates):
+                val = f"{dates.min().strftime('%d %b %y')} → {dates.max().strftime('%d %b %y')}"
+            lbl = label or f"Range of {col}"
+        elif kpi_type == "% of Total (category share)" and col in num_c and filter_col and filter_val:
+            tot = df[col].sum()
+            sub = df[df[filter_col].astype(str) == str(filter_val)][col].sum()
+            val = f"{sub/tot*100:.1f}" if tot else "0.0"; sfx = "%"
+            lbl = label or f"{filter_val} share"
+        elif kpi_type == "Top Category → Value" and group_col and metric_col in num_c:
+            grp = df.groupby(group_col)[metric_col].sum()
+            val = f"{grp.idxmax()}: {_fmt_num(grp.max())}"; lbl = label or f"Top {group_col}"
+        elif kpi_type == "Bottom Category → Value" and group_col and metric_col in num_c:
+            grp = df.groupby(group_col)[metric_col].sum()
+            val = f"{grp.idxmin()}: {_fmt_num(grp.min())}"; lbl = label or f"Bottom {group_col}"
+        elif kpi_type == "% Change (Latest Month vs Prev Month)" and col in num_c and filter_col:
+            dates = pd.to_datetime(df[filter_col], errors="coerce")
+            df2 = df.copy(); df2["_dt"] = dates; df2 = df2.dropna(subset=["_dt"])
+            latest_m = df2["_dt"].dt.to_period("M").max()
+            prev_m   = latest_m - 1
+            cur_val  = df2[df2["_dt"].dt.to_period("M") == latest_m][col].sum()
+            prev_val = df2[df2["_dt"].dt.to_period("M") == prev_m][col].sum()
+            pct = (cur_val - prev_val) / abs(prev_val) * 100 if prev_val else 0
+            val = f"{'+' if pct >= 0 else ''}{pct:.1f}"; sfx = "%"
+            lbl = label or f"MoM {col}"
+            return {"icon": icon, "label": lbl, "value": val, "prefix": pfx, "suffix": sfx,
+                    "change_pct": float(pct)}
+        elif kpi_type == "% Change (Latest Year vs Prev Year)" and col in num_c and filter_col:
+            dates = pd.to_datetime(df[filter_col], errors="coerce")
+            df2 = df.copy(); df2["_dt"] = dates; df2 = df2.dropna(subset=["_dt"])
+            latest_y = df2["_dt"].dt.year.max()
+            cur_val  = df2[df2["_dt"].dt.year == latest_y][col].sum()
+            prev_val = df2[df2["_dt"].dt.year == (latest_y - 1)][col].sum()
+            pct = (cur_val - prev_val) / abs(prev_val) * 100 if prev_val else 0
+            val = f"{'+' if pct >= 0 else ''}{pct:.1f}"; sfx = "%"
+            lbl = label or f"YoY {col}"
+            return {"icon": icon, "label": lbl, "value": val, "prefix": pfx, "suffix": sfx,
+                    "change_pct": float(pct)}
     except Exception as e:
-        msg = str(e)
-        if "username" in msg.lower(): return False, "Username already taken."
-        if "email"    in msg.lower(): return False, "Email already registered."
-        return False, msg
-    finally:
-        conn.close()
+        val = f"Err: {e}"
+    return {"icon":icon,"label":lbl,"value":val,"prefix":pfx,"suffix":sfx}
 
 
-def login_user(username: str, password: str):
-    """
-    Validate login credentials.
+def _kpi_card_html(kpi):
+    change_pct = kpi.get("change_pct")
+    arrow_html = ""
+    if change_pct is not None:
+        is_pos  = change_pct >= 0
+        color   = "#10b981" if is_pos else "#ef4444"
+        arrow   = "▲" if is_pos else "▼"
+        arrow_html = (
+            f'<div style="font-size:0.78rem;font-weight:700;color:{color};margin-top:3px;">'
+            f'{arrow} {abs(change_pct):.1f}% vs prior period</div>'
+        )
+    icon   = escape(str(kpi.get("icon", "📊")))
+    value  = escape(str(kpi.get("value", "--")))
+    prefix = escape(str(kpi.get("prefix", "")))
+    suffix = escape(str(kpi.get("suffix", "")))
+    label  = escape(str(kpi.get("label", "")))
 
-    Automatically upgrades a bare SHA-256 legacy hash to the salted PBKDF2
-    format on successful login, so old accounts become more secure transparently.
+    # K / M / B unit badge
+    # _fmt_num() produces strings like "1.2K", "3.4M", "2.1B".
+    # We split the numeric part from the unit and render the unit as a small
+    # styled badge so the scale is immediately readable at a glance.
+    # Values without a K/M/B suffix (e.g. "42", "8.3%", date ranges) pass through unchanged.
+    _UNIT_META = {
+        "B": ("B", "Billions",  "#8b5cf6"),
+        "M": ("M", "Millions",  "#4f6ef7"),
+        "K": ("K", "Thousands", "#06b6d4"),
+    }
+    unit_html = ""
+    num_part  = value
+    for unit, (badge_label, title, color) in _UNIT_META.items():
+        if (value.endswith(unit) and len(value) > 1
+                and value[:-1].replace(".", "").replace("-", "").isdigit()):
+            num_part  = value[:-1]
+            unit_html = (
+                f'<span title="{title}" style="' 
+                f'display:inline-block;margin-left:4px;' 
+                f'font-size:0.72rem;font-weight:700;' 
+                f'background:{color}22;color:{color};' 
+                f'border:1px solid {color}55;' 
+                f'border-radius:5px;padding:1px 5px;' 
+                f'vertical-align:middle;letter-spacing:0.04em;' 
+                f'">{badge_label}</span>'
+            )
+            break
 
-    Returns:
-        (user_id: int, username: str) on success.
-        None on failure (wrong username or wrong password).
-    """
-    conn = _connect()
-    c    = conn.cursor()
-    c.execute(
-        _ph("SELECT id, username, password_hash FROM users WHERE username=?"),
-        (username,))
-    row = c.fetchone()
-    conn.close()
-    if not row:
-        return None
-    uid, uname, stored_hash = row
-    if not _verify(password, stored_hash):
-        return None
-    # Upgrade legacy bare-sha256 hash to salted PBKDF2 silently.
-    if "$" not in stored_hash:
-        try:
-            upd = _connect()
-            upd.execute(
-                _ph("UPDATE users SET password_hash=? WHERE id=?"),
-                (_hash(password), uid))
-            upd.commit()
-            upd.close()
-        except Exception:
-            pass
-    return uid, uname
+    full_val    = f"{prefix}{value}{suffix}"
+    is_long     = len(full_val) > 14
+    val_style   = (
+        "font-size:0.95rem;font-weight:800;color:#4f6ef7;line-height:1.25;"
+        "margin-top:4px;word-break:break-word;overflow-wrap:anywhere;"
+    ) if is_long else (
+        "font-size:1.15rem;font-weight:800;color:#4f6ef7;line-height:1.2;"
+        "margin-top:4px;white-space:nowrap;"
+    )
+    val_display = f"{prefix}{num_part}{unit_html}{suffix}"
 
-
-def create_token(user_id: int, username: str) -> str:
-    """
-    Issue a new persistent login token (7-day expiry).
-
-    Tokens are stored in login_tokens. On page refresh, app.py validates the
-    token from the ?t= URL parameter to restore the session without re-login.
-
-    Returns:
-        A 32-character hex token string.
-    """
-    token   = uuid.uuid4().hex
-    expires = (
-        datetime.datetime.now(datetime.timezone.utc)
-        + datetime.timedelta(days=7)
-    ).isoformat()
-    conn = _connect()
-    # Postgres uses INSERT ... ON CONFLICT; SQLite uses INSERT OR REPLACE.
-    conn.execute(
-        _ph("INSERT INTO login_tokens (token, user_id, username, expires_at) "
-            "VALUES (?,?,?,?) "
-            "ON CONFLICT(token) DO UPDATE SET expires_at=EXCLUDED.expires_at")
-        if _PG else
-        _ph("INSERT OR REPLACE INTO login_tokens "
-            "(token, user_id, username, expires_at) VALUES (?,?,?,?)"),
-        (token, user_id, username, expires))
-    conn.commit()
-    conn.close()
-    return token
-
-
-def validate_token(token: str):
-    """
-    Validate a login token and return the associated user.
-
-    Handles both string expiry (SQLite) and datetime expiry (Postgres)
-    transparently.
-
-    Returns:
-        (user_id: int, username: str) if valid and not expired.
-        None otherwise.
-    """
-    if not token:
-        return None
-    conn = _connect()
-    c    = conn.cursor()
-    c.execute(
-        _ph("SELECT user_id, username, expires_at FROM login_tokens WHERE token=?"),
-        (token,))
-    row = c.fetchone()
-    conn.close()
-    if not row:
-        return None
-
-    # Normalise expires_at to an aware datetime regardless of DB backend.
-    expires_raw = row[2]
-    if isinstance(expires_raw, datetime.datetime):
-        expires_dt = (expires_raw if expires_raw.tzinfo
-                      else expires_raw.replace(tzinfo=datetime.timezone.utc))
-    else:
-        expires_str = str(expires_raw).replace("Z", "+00:00")
-        try:
-            expires_dt = datetime.datetime.fromisoformat(expires_str)
-        except ValueError:
-            return None  # Unparseable expiry -- treat as expired.
-        if expires_dt.tzinfo is None:
-            expires_dt = expires_dt.replace(tzinfo=datetime.timezone.utc)
-
-    if datetime.datetime.now(datetime.timezone.utc) >= expires_dt:
-        return None  # Token has expired.
-
-    return row[0], row[1]
+    return (
+        f'<div style="background:rgba(79,110,247,0.07);border:1px solid rgba(79,110,247,0.18);' 
+        f'border-radius:12px;padding:0.7rem 0.9rem;text-align:center;' 
+        f'width:100%;box-shadow:0 2px 8px rgba(0,0,0,0.06);flex:1;">' 
+        f'<div style="font-size:1.2rem;line-height:1">{icon}</div>' 
+        f'<div style="{val_style}">{val_display}</div>' 
+        f'{arrow_html}' 
+        f'<div style="font-size:0.63rem;opacity:0.6;text-transform:uppercase;' 
+        f'letter-spacing:.07em;margin-top:4px;font-weight:600">{label}</div>' 
+        f'</div>' 
+    )
 
 
-def revoke_token(token: str) -> None:
-    """Delete a login token (called on sign-out)."""
-    conn = _connect()
-    conn.execute(_ph("DELETE FROM login_tokens WHERE token=?"), (token,))
-    conn.commit()
-    conn.close()
+def _render_kpi_section(df, readonly):
+    if "kpis" not in st.session_state:
+        st.session_state.kpis = []
 
+    st.markdown("### 📌 KPI Cards")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Draft session persistence  (auto-save / resume on page refresh)
-# ─────────────────────────────────────────────────────────────────────────────
+    # ── Display existing ──────────────────────────────────────────────────────
+    kpis = st.session_state.kpis
+    if kpis:
+        cols_per_row = 4
+        rows = [kpis[i:i+cols_per_row] for i in range(0, len(kpis), cols_per_row)]
+        for row in rows:
+            rcols = st.columns(len(row))
+            for ci, (kpi, rc) in enumerate(zip(row, rcols)):
+                with rc:
+                    st.markdown(_kpi_card_html(kpi), unsafe_allow_html=True)
+                    if not readonly:
+                        gi = kpis.index(kpi)
+                        if st.button("✕", key=f"kpi_rm_{gi}", help="Remove KPI",
+                                     use_container_width=True):
+                            kpis.pop(gi); _persist(); st.rerun()
+        st.markdown("<br>", unsafe_allow_html=True)
 
-def save_draft(user_id: int, page: str, charts_json: str, file_name: str = "",
-               editing_session_id=None, editing_session_name=None,
-               dashboard_title: str = "", kpis_json: str = "[]",
-               chart_meta_json: str = "{}", layout_mode: str = "portrait") -> None:
-    """
-    Upsert the user's current in-progress state to draft_sessions.
+    # ── Add new KPI ───────────────────────────────────────────────────────────
+    if not readonly and df is not None:
+        with st.expander("➕ Add KPI from Dataset", expanded=len(kpis) == 0):
+            num_c = df.select_dtypes(include="number").columns.tolist()
+            cat_c = df.select_dtypes(include=["object","category"]).columns.tolist()
+            all_c = df.columns.tolist()
 
-    Called by pages/dashboard.py on every meaningful state change. On the
-    next page load, app.py calls get_draft() to restore this state.
+            ka, kb = st.columns(2)
+            with ka:
+                ktype  = st.selectbox("KPI Type", _KPI_TYPES, key="kpi_type")
+            with kb:
+                klabel = st.text_input("Custom Label (leave blank for auto)",
+                                       key="kpi_label",
+                                       placeholder="e.g. Total Revenue")
 
-    Uses INSERT OR REPLACE (SQLite) / INSERT ... ON CONFLICT DO UPDATE (PG)
-    because there is at most one draft row per user.
+            col = grp = met = fcol = fval = None
 
-    Args:
-        user_id:              The acting user's DB ID.
-        page:                 Current page slug (e.g. "analysis").
-        charts_json:          JSON string from charts_to_json().
-        file_name:            Active file name for display.
-        editing_session_id:   DB ID of the saved session being edited, if any.
-        editing_session_name: Display name of that session.
-        dashboard_title:      Current dashboard title string.
-        kpis_json:            JSON-encoded list of KPI dicts.
-        chart_meta_json:      JSON-encoded dict of per-chart metadata keys.
-        layout_mode:          "portrait" or "landscape".
-    """
-    try:
-        conn = _connect()
-        if _PG:
-            conn.execute("""
-                INSERT INTO draft_sessions
-                    (user_id, page, charts_json, file_name, editing_session_id,
-                     editing_session_name, dashboard_title, kpis_json,
-                     chart_meta_json, layout_mode, updated_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    page=EXCLUDED.page, charts_json=EXCLUDED.charts_json,
-                    file_name=EXCLUDED.file_name,
-                    editing_session_id=EXCLUDED.editing_session_id,
-                    editing_session_name=EXCLUDED.editing_session_name,
-                    dashboard_title=EXCLUDED.dashboard_title,
-                    kpis_json=EXCLUDED.kpis_json,
-                    chart_meta_json=EXCLUDED.chart_meta_json,
-                    layout_mode=EXCLUDED.layout_mode,
-                    updated_at=CURRENT_TIMESTAMP""",
-                (user_id, page, charts_json, file_name,
-                 editing_session_id, editing_session_name,
-                 dashboard_title, kpis_json, chart_meta_json, layout_mode))
-        else:
-            conn.execute("""
-                INSERT OR REPLACE INTO draft_sessions
-                    (user_id, page, charts_json, file_name, editing_session_id,
-                     editing_session_name, dashboard_title, kpis_json,
-                     chart_meta_json, layout_mode, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)""",
-                (user_id, page, charts_json, file_name,
-                 editing_session_id, editing_session_name,
-                 dashboard_title, kpis_json, chart_meta_json, layout_mode))
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
+            simple_num = {"Total (Sum)","Average (Mean)","Median",
+                          "Minimum Value","Maximum Value"}
+            if ktype in simple_num:
+                col = st.selectbox("Numeric column", num_c, key="kpi_col")
+            elif ktype == "Unique Values Count":
+                col = st.selectbox("Column", all_c, key="kpi_col2")
+            elif ktype == "Date Range":
+                dt_c = [c for c in all_c if any(x in c.lower() for x in
+                        ("date","time","dt","year","month"))] or all_c
+                col  = st.selectbox("Date column", dt_c, key="kpi_dt")
+            elif ktype == "% of Total (category share)":
+                p1, p2, p3 = st.columns(3)
+                with p1: col  = st.selectbox("Numeric col", num_c, key="kpi_pc")
+                with p2: fcol = st.selectbox("Filter col",  cat_c, key="kpi_fc") if cat_c else None
+                if fcol:
+                    uniq = df[fcol].dropna().unique().tolist()
+                    with p3: fval = st.selectbox("Filter value", uniq, key="kpi_fv")
+            elif ktype in ("Top Category → Value","Bottom Category → Value"):
+                g1, g2 = st.columns(2)
+                with g1: grp = st.selectbox("Category col", cat_c, key="kpi_grp") if cat_c else None
+                with g2: met = st.selectbox("Metric col", num_c,   key="kpi_met") if num_c else None
+            elif ktype in ("% Change (Latest Month vs Prev Month)",
+                           "% Change (Latest Year vs Prev Year)"):
+                dt_c = [c for c in all_c if any(x in c.lower() for x in
+                        ("date","time","dt","year","month"))] or all_c
+                p1, p2 = st.columns(2)
+                with p1: fcol = st.selectbox("Date column",   dt_c,  key="kpi_chg_dt")
+                with p2: col  = st.selectbox("Metric column", num_c, key="kpi_chg_met") if num_c else None
 
-
-def get_draft(user_id: int) -> Optional[dict]:
-    """
-    Retrieve the stored draft for a user.
-
-    Returns:
-        dict with keys matching draft_sessions columns, or None if no draft exists.
-    """
-    try:
-        conn = _connect()
-        c    = conn.cursor()
-        c.execute(_ph("SELECT * FROM draft_sessions WHERE user_id=?"), (user_id,))
-        row = c.fetchone()
-        conn.close()
-        if not row:
-            return None
-        keys = ["user_id", "page", "charts_json", "file_name",
-                "editing_session_id", "editing_session_name",
-                "dashboard_title", "kpis_json", "chart_meta_json",
-                "layout_mode", "updated_at"]
-        return dict(zip(keys, row))
-    except Exception:
-        return None
-
-
-def clear_draft(user_id: int) -> None:
-    """Delete the draft row for a user (called after a successful session save)."""
-    try:
-        conn = _connect()
-        conn.execute(_ph("DELETE FROM draft_sessions WHERE user_id=?"), (user_id,))
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
+            if st.button("➕ Calculate & Add KPI", type="primary", key="kpi_add_btn"):
+                kpi = _calc_kpi(df, ktype, col, grp, met, fcol, fval, klabel or None)
+                st.session_state.kpis.append(kpi)
+                _persist()
+                st.success(f"✅ {kpi['label']}: {kpi['value']}{kpi['suffix']}")
+                st.rerun()
+    elif not readonly:
+        st.caption("Upload a dataset and go to Analysis first to enable KPI calculation.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sessions CRUD
+# Visual Grid Layout Builder
 # ─────────────────────────────────────────────────────────────────────────────
-
-def save_session_db(user_id: int, session_name: str, file_name: str,
-                    rows: int, cols: int, analysis_types: list,
-                    charts_json: str, dashboard_title: str = "",
-                    kpis_json: str = "[]", layout_mode: str = "portrait") -> int:
+def _render_layout_builder(charts):
     """
-    Insert a new saved session and return its DB ID.
-
-    Args:
-        user_id:        Owner's DB ID.
-        session_name:   Display name chosen by the user.
-        file_name:      Name of the uploaded file.
-        rows / cols:    Dataset dimensions.
-        analysis_types: List of analysis ID strings run in this session.
-        charts_json:    Serialised charts from charts_to_json().
-        dashboard_title, kpis_json, layout_mode: Dashboard metadata.
-
-    Returns:
-        int -- the new session's DB row ID.
+    Visual grid layout builder. Supports 2-column (default) and independent
+    3-column grid mode, each slot with a full-width toggle.
     """
-    conn = _connect()
-    c    = conn.cursor()
-    c.execute(
-        _ph("""INSERT INTO sessions
-           (user_id, session_name, file_name, rows_count, cols_count,
-            analysis_types, charts_json, dashboard_title, kpis_json, layout_mode)
-           VALUES (?,?,?,?,?,?,?,?,?,?)"""),
-        (user_id, session_name, file_name, rows, cols,
-         json.dumps(analysis_types), charts_json,
-         dashboard_title, kpis_json, layout_mode))
-    conn.commit()
-    sid = _last_id(c)
-    conn.close()
-    log_activity(user_id, "dashboard_saved",
-                 f"session='{session_name}' file='{file_name}'", sid)
-    return sid
-
-
-def rename_session_db(session_id: int, new_name: str, user_id=None) -> None:
-    """
-    Rename a saved session.
-
-    When user_id is provided, an extra AND user_id=? guard prevents users
-    from renaming sessions belonging to other accounts.
-    """
-    conn = _connect()
-    if user_id is None:
-        conn.execute(
-            _ph("UPDATE sessions SET session_name=? WHERE id=?"),
-            (new_name, session_id))
-    else:
-        conn.execute(
-            _ph("UPDATE sessions SET session_name=? WHERE id=? AND user_id=?"),
-            (new_name, session_id, user_id))
-    conn.commit()
-    conn.close()
-
-
-def delete_session_db(session_id: int, user_id: int) -> None:
-    """Delete a saved session. The user_id guard prevents cross-account deletion."""
-    conn = _connect()
-    conn.execute(
-        _ph("DELETE FROM sessions WHERE id=? AND user_id=?"),
-        (session_id, user_id))
-    conn.commit()
-    conn.close()
-
-
-def delete_user_db(user_id: int) -> bool:
-    """
-    Permanently delete a user account and all associated data.
-
-    Deletes in FK-dependency order:
-        login_tokens → draft_sessions → user_activity → sessions → users
-
-    FIX: log_activity() is NOT called after deletion -- the user row no longer
-    exists in `users`, so any FK constraint on user_activity would fail.
-
-    Returns:
-        True on success, False if any error occurred.
-    """
-    try:
-        conn = _connect()
-        conn.execute(_ph("DELETE FROM login_tokens   WHERE user_id=?"), (user_id,))
-        conn.execute(_ph("DELETE FROM draft_sessions WHERE user_id=?"), (user_id,))
-        conn.execute(_ph("DELETE FROM user_activity  WHERE user_id=?"), (user_id,))
-        conn.execute(_ph("DELETE FROM sessions        WHERE user_id=?"), (user_id,))
-        conn.execute(_ph("DELETE FROM users           WHERE id=?"),      (user_id,))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
-def update_session_db(session_id: int, session_name: str, charts_json: str,
-                      analysis_types: list, user_id: int,
-                      dashboard_title: str = "", kpis_json: str = "[]",
-                      layout_mode: str = "portrait") -> None:
-    """
-    Overwrite a saved session's charts and metadata in-place.
-
-    The user_id guard ensures only the owner can update their sessions.
-    """
-    conn = _connect()
-    conn.execute(
-        _ph("""UPDATE sessions
-           SET session_name=?, charts_json=?, analysis_types=?,
-               dashboard_title=?, kpis_json=?, layout_mode=?
-           WHERE id=? AND user_id=?"""),
-        (session_name, charts_json, json.dumps(analysis_types),
-         dashboard_title, kpis_json, layout_mode,
-         session_id, user_id))
-    conn.commit()
-    conn.close()
-    log_activity(user_id, "session_updated",
-                 f"session_id={session_id} name='{session_name}'")
-
-
-def get_user_sessions(user_id: int) -> list:
-    """
-    Fetch the 20 most recent sessions for a user (newest first).
-
-    Returns:
-        list of tuples: (id, session_name, file_name, rows_count, cols_count,
-                         analysis_types, created_at)
-    """
-    conn = _connect()
-    c    = conn.cursor()
-    c.execute(
-        _ph("""SELECT id, session_name, file_name, rows_count, cols_count,
-                  analysis_types, created_at
-           FROM sessions WHERE user_id=? ORDER BY created_at DESC LIMIT 20"""),
-        (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-
-def get_session_meta(session_id: int, user_id=None) -> Optional[dict]:
-    """
-    Fetch dashboard metadata for a session (title, KPIs, layout mode).
-
-    When user_id is None, the row is fetched without an ownership check
-    (used for shared/view-only dashboard links).
-
-    Returns:
-        dict with keys: dashboard_title, kpis_json, layout_mode
-        None if the session is not found.
-    """
-    try:
-        conn = _connect()
-        c    = conn.cursor()
-        if user_id is None:
-            c.execute(
-                _ph("SELECT dashboard_title, kpis_json, layout_mode "
-                    "FROM sessions WHERE id=?"),
-                (session_id,))
-        else:
-            c.execute(
-                _ph("SELECT dashboard_title, kpis_json, layout_mode "
-                    "FROM sessions WHERE id=? AND user_id=?"),
-                (session_id, user_id))
-        row = c.fetchone()
-        conn.close()
-        if row:
-            return {
-                "dashboard_title": row[0] or "",
-                "kpis_json":       row[1] or "[]",
-                "layout_mode":     row[2] or "portrait",
-            }
-    except Exception:
-        pass
-    return None
-
-
-def get_session_charts(session_id: int, user_id=None) -> list:
-    """
-    Load and deserialise the charts stored in a saved session.
-
-    Returns:
-        list of tuples:
-            (uid, title, fig, desc, auto_insights, chart_type, meta)
-
-        where fig is a live Plotly Figure object deserialised from JSON.
-        Tuples for charts that fail to deserialise are silently skipped.
-
-    Note:
-        This is a pure data function. Callers are responsible for writing
-        the returned metadata into session_state if needed.
-    """
-    import plotly.io as pio
-    conn = _connect()
-    c    = conn.cursor()
-    if user_id is None:
-        c.execute(_ph("SELECT charts_json FROM sessions WHERE id=?"), (session_id,))
-    else:
-        c.execute(
-            _ph("SELECT charts_json FROM sessions WHERE id=? AND user_id=?"),
-            (session_id, user_id))
-    row = c.fetchone()
-    conn.close()
-    if not (row and row[0]):
+    if not charts:
         return []
 
-    charts = []
-    for item in json.loads(row[0]):
-        try:
-            uid           = item.get("uid", uuid.uuid4().hex[:8])
-            desc          = item.get("desc", "")
-            auto_insights = item.get("auto_insights", [])
-            chart_type    = item.get("chart_type", "")
-            meta          = item.get("meta", {})
-            fig           = pio.from_json(item["fig_json"])
-            charts.append((uid, item["title"], fig, desc,
-                           auto_insights, chart_type, meta))
-        except Exception:
-            pass  # Skip damaged chart entries silently.
-    return charts
+    n = len(charts)
+    uid_list   = [c[0] for c in charts]
+    title_map  = {c[0]: c[1] for c in charts}
+    EMPTY      = "(empty)"
+    opts       = [EMPTY] + [f"[{uid}] {title_map[uid][:45]}" for uid in uid_list]
+    uid_of_opt = {f"[{uid}] {title_map[uid][:45]}": uid for uid in uid_list}
+
+    if "grid_order" not in st.session_state or \
+            set(st.session_state.grid_order) != set(uid_list):
+        st.session_state.grid_order     = uid_list.copy()
+        st.session_state.grid_fullwidth = {}
+
+    order      = list(st.session_state.grid_order)
+    full_width = dict(st.session_state.grid_fullwidth)
+
+    st.markdown("### 🗂️ Arrange Charts in Dashboard Grid")
+
+    # ── Independent column-count selector ────────────────────────────────────
+    grid_cols_n = st.radio(
+        "Grid columns",
+        [2, 3],
+        index=0 if st.session_state.get("grid_cols_n", 2) == 2 else 1,
+        horizontal=True,
+        format_func=lambda x: f"{x}-Column Grid",
+        key="grid_cols_radio",
+    )
+    st.session_state.grid_cols_n = grid_cols_n
+
+    st.caption(
+        f"Each row has **{grid_cols_n} slots**. "
+        "Tick **Full Width** to span the first slot across the entire row.")
+
+    st.markdown(
+        '<div style="background:rgba(79,110,247,0.04);border:2px dashed rgba(79,110,247,0.25);'
+        'border-radius:16px;padding:1.2rem 1.4rem;margin-bottom:1rem;">',
+        unsafe_allow_html=True)
+
+    assigned_uids = []
+    seen = set()
+    max_rows = n  # worst case: every chart is full-width
+
+    for row_i in range(max_rows):
+        base      = row_i * grid_cols_n
+        slot_uids = [
+            order[base + s] if (base + s) < len(order) else None
+            for s in range(grid_cols_n)
+        ]
+        slot_opts = [
+            (f"[{u}] {title_map.get(u,'')[:45]}" if u and u in title_map else EMPTY)
+            for u in slot_uids
+        ]
+
+        is_fw = full_width.get(slot_uids[0], False) if slot_uids[0] else False
+
+        st.markdown(
+            f'<div style="font-size:0.75rem;font-weight:700;color:#64748b;'
+            f'text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">'
+            f'Row {row_i + 1}</div>',
+            unsafe_allow_html=True)
+
+        # columns: N slots + 1 narrow full-width toggle
+        col_parts = st.columns([5] * grid_cols_n + [2])
+        fw_here = col_parts[-1].checkbox(
+            "Full width", value=is_fw, key=f"grid_fw_{row_i}",
+            help="Span first slot's chart across the entire row")
+
+        chosen_slots = []
+        for s in range(grid_cols_n):
+            if fw_here and s > 0:
+                col_parts[s].markdown(
+                    '<div style="height:38px;display:flex;align-items:center;'
+                    'background:rgba(79,110,247,0.06);border-radius:8px;'
+                    'justify-content:center;font-size:0.8rem;opacity:0.5;">'
+                    '← Full width →</div>', unsafe_allow_html=True)
+                chosen_slots.append(EMPTY)
+            else:
+                chosen = col_parts[s].selectbox(
+                    f"Slot {row_i + 1}{chr(65 + s)}",
+                    opts,
+                    index=opts.index(slot_opts[s]) if slot_opts[s] in opts else 0,
+                    key=f"grid_s{s}_{row_i}",
+                    label_visibility="collapsed")
+                chosen_slots.append(chosen)
+
+        lu = uid_of_opt.get(chosen_slots[0])
+        if lu and lu not in seen:
+            assigned_uids.append(lu)
+            seen.add(lu)
+            full_width[lu] = fw_here
+
+        if not fw_here:
+            for s in range(1, grid_cols_n):
+                ru = uid_of_opt.get(chosen_slots[s])
+                if ru and ru not in seen:
+                    assigned_uids.append(ru)
+                    seen.add(ru)
+
+        if all(uid_of_opt.get(c) is None for c in chosen_slots):
+            break
+        if len(seen) >= n:
+            break
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    for uid in uid_list:
+        if uid not in seen:
+            assigned_uids.append(uid)
+
+    if st.button("✅ Apply Layout", type="primary", key="apply_layout"):
+        st.session_state.grid_order     = assigned_uids
+        st.session_state.grid_fullwidth = full_width
+        st.session_state.grid_cols_n    = grid_cols_n
+        _persist()
+        st.success("✅ Layout applied!")
+        st.rerun()
+
+    return assigned_uids
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-chart settings panel
+# ─────────────────────────────────────────────────────────────────────────────
+def _chart_settings(uid, title, fig, auto_insights, readonly):
+    meta = _meta(uid) if not readonly else {}
+
+    with st.expander("⚙️ Chart Settings", expanded=False):
+        if readonly:
+            st.caption("Read-only in view mode.")
+            return
+
+        # ── Title (single canonical place to edit) ────────────────────────────
+        nt = st.text_input(
+            "Chart Title",
+            value=_meta(uid).get("custom_title", "") or title,
+            key=f"ct_{uid}",
+            help="Edits the title shown inside the chart and in exports.")
+
+        a, b = st.columns(2)
+        with a:
+            sub = st.text_input("Subtitle",
+                                value=_meta(uid).get("subtitle",""),
+                                placeholder="Optional -- shown below title…",
+                                key=f"sub_{uid}")
+        with b:
+            pass   # room for future field
+
+        c, d = st.columns(2)
+        with c:
+            xl = st.text_input("X-Axis label", value=_meta(uid).get("x_label",""),
+                               key=f"xl_{uid}")
+        with d:
+            yl = st.text_input("Y-Axis label", value=_meta(uid).get("y_label",""),
+                               key=f"yl_{uid}")
+
+        show_ai = st.checkbox("Show auto-insights in report",
+                              value=_meta(uid).get("show_auto_insights", True),
+                              key=f"sai_{uid}")
+        hidden = set(_meta(uid).get("hidden_insights", []))
+        if auto_insights and show_ai:
+            st.markdown("**Toggle insights (uncheck to hide from export):**")
+            new_hidden = set()
+            for i, ins in enumerate(auto_insights):
+                label = clean_insight_text(ins)
+                if not st.checkbox(label[:80]+("…" if len(label)>80 else ""),
+                                   value=i not in hidden, key=f"ins_{uid}_{i}"):
+                    new_hidden.add(i)
+            hidden = new_hidden
+
+        if st.button("💾 Save Settings", key=f"save_{uid}", type="primary"):
+            _set_meta(uid, custom_title=nt, subtitle=sub,
+                      x_label=xl, y_label=yl,
+                      show_auto_insights=show_ai,
+                      hidden_insights=list(hidden))
+            # Also update the stored chart title tuple so the list header matches
+            charts = st.session_state.get("charts", [])
+            st.session_state.charts = [
+                (c[0], nt if c[0] == uid else c[1], c[2])
+                for c in charts
+            ]
+            _persist()
+            st.success("Saved!")
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Single chart card
+# ─────────────────────────────────────────────────────────────────────────────
+def _render_chart(item, idx, total, viewing_saved):
+    uid, title, fig, desc, autos, ctype, saved_meta = \
+        item if len(item) == 7 else (*item[:6], {})
+    meta = saved_meta if viewing_saved else _meta(uid)
+    note_key = f"desc_{uid}"
+    if not viewing_saved and note_key not in st.session_state:
+        st.session_state[note_key] = desc
+
+    display = meta.get("custom_title") or title
+    sub     = meta.get("subtitle","")
+    xl      = meta.get("x_label","")
+    yl      = meta.get("y_label","")
+
+    fig_show = _apply_axes(fig, xl, yl)
+    # Prepare display figure -- apply axis labels and styling but do NOT embed
+    # the title inside the Plotly figure (it is rendered as a heading above the
+    # chart instead, so it only appears once).
+    try:
+        import copy as _copy
+        fig_show = _copy.deepcopy(fig_show)
+
+        if sub:
+            safe_sub = escape(str(sub))
+            fig_show.update_layout(title=dict(
+                text=f"<sup style='font-size:11px;color:#64748b'>{safe_sub}</sup>",
+                font=dict(size=11)))
+        else:
+            fig_show.update_layout(title_text="")
+
+        # ── Axis readability: angle x-tick labels, shrink font, expand margin
+        is_horiz = any(getattr(t, "orientation", "v") == "h"
+                       for t in fig_show.data if hasattr(t, "orientation"))
+        if is_horiz:
+            fig_show.update_yaxes(tickfont=dict(size=10), automargin=True)
+            fig_show.update_xaxes(tickfont=dict(size=10))
+            fig_show.update_layout(margin=dict(l=120, r=20, t=28, b=20))
+        else:
+            fig_show.update_xaxes(tickangle=-35, tickfont=dict(size=10), automargin=True)
+            fig_show.update_yaxes(tickfont=dict(size=10), automargin=True)
+            fig_show.update_layout(margin=dict(l=20, r=20, t=28, b=80))
+    except Exception:
+        pass
+
+    # ── Control buttons (edit mode only) ─────────────────────────────────────
+    if not viewing_saved:
+        btn_cols = st.columns([9, 1, 1, 1])
+        with btn_cols[1]:
+            if idx > 0 and st.button("⬆", key=f"up_{uid}"):
+                cl = st.session_state.get("charts",[])
+                i  = next((j for j,c in enumerate(cl) if c[0]==uid),-1)
+                if i > 0:
+                    cl[i-1],cl[i] = cl[i],cl[i-1]
+                    go = st.session_state.get("grid_order",[])
+                    gi = next((j for j,u in enumerate(go) if u==uid),-1)
+                    if gi > 0: go[gi-1],go[gi] = go[gi],go[gi-1]
+                    _persist(); st.rerun()
+        with btn_cols[2]:
+            if idx < total-1 and st.button("⬇", key=f"dn_{uid}"):
+                cl = st.session_state.get("charts",[])
+                i  = next((j for j,c in enumerate(cl) if c[0]==uid),-1)
+                if i >= 0 and i < len(cl)-1:
+                    cl[i],cl[i+1] = cl[i+1],cl[i]
+                    go = st.session_state.get("grid_order",[])
+                    gi = next((j for j,u in enumerate(go) if u==uid),-1)
+                    if gi >= 0 and gi < len(go)-1: go[gi],go[gi+1] = go[gi+1],go[gi]
+                    _persist(); st.rerun()
+        with btn_cols[3]:
+            if st.button("🗑", key=f"rm_{uid}"):
+                st.session_state.charts = [c for c in st.session_state.get("charts",[])
+                                           if c[0] != uid]
+                if "grid_order" in st.session_state:
+                    st.session_state.grid_order = [u for u in st.session_state.grid_order
+                                                   if u != uid]
+                _persist(); st.rerun()
+
+    # ── Chart title rendered once as a heading (not inside Plotly) ───────────
+    st.markdown(
+        f'<div style="font-size:0.93rem;font-weight:700;color:#1e293b;margin-bottom:2px;">'
+        f'{escape(str(display))}</div>'
+        + (f'<div style="font-size:0.78rem;color:#64748b;margin-bottom:4px;">'
+           f'{escape(str(sub))}</div>' if sub else ""),
+        unsafe_allow_html=True)
+
+    st.plotly_chart(fig_show, use_container_width=True)
+
+    # Insights
+    show_ai = meta.get("show_auto_insights", True)
+    hidden  = set(meta.get("hidden_insights",[]))
+    if autos and show_ai:
+        visible = [ins for i,ins in enumerate(autos) if i not in hidden]
+        if visible:
+            with st.expander("💡 Insights", expanded=False):
+                for ins in visible: st.markdown(f"- {clean_insight_text(ins)}")
+
+    # Analysis notes are independent of auto-insights and always export/save.
+    live_desc = st.session_state.get(note_key, "") if not viewing_saved else (desc or "")
+    if viewing_saved:
+        if live_desc:
+            safe_desc = escape(str(live_desc))
+            st.markdown(
+                f'<div style="background:rgba(139,92,246,0.07);border-left:3px solid #8b5cf6;'
+                f'border-radius:6px;padding:.6rem .9rem;font-size:.87rem;margin-top:.3rem;">'
+                f'<strong>Analysis Notes:</strong> {safe_desc}</div>', unsafe_allow_html=True)
+    else:
+        st.text_area(
+            "✍️ Analysis Notes",
+            key=note_key,
+            placeholder="Add your findings or observations here…")
+        if "editing_session_id" in st.session_state:
+            if st.button("💾 Update Session Notes", key=f"update_notes_{uid}",
+                         use_container_width=True):
+                _do_update(
+                    st.session_state.get("editing_session_name", "Session"),
+                    st.session_state.get("charts", []),
+                    clear_editing=False)
+                st.rerun()
+
+    _chart_settings(uid, title, fig, autos, viewing_saved)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Grid renderer -- respects grid_order and grid_fullwidth
+# ─────────────────────────────────────────────────────────────────────────────
+def _render_grid(ordered_charts, viewing_saved):
+    total    = len(ordered_charts)
+    fw       = st.session_state.get("grid_fullwidth", {})
+    n_cols   = st.session_state.get("grid_cols_n", 2)  # 2 or 3
+    i = 0
+    while i < total:
+        item     = ordered_charts[i]
+        uid      = item[0]
+        item_meta = item[6] if viewing_saved and len(item) > 6 else _meta(uid)
+        is_fw    = fw.get(uid, False) or item_meta.get("full_width", False)
+
+        if is_fw or i == total - 1:
+            # Full-width or lone last chart
+            with st.container():
+                _render_chart(item, i, total, viewing_saved)
+            st.markdown("<br>", unsafe_allow_html=True)
+            i += 1
+        else:
+            # Try to fill a full row of n_cols
+            row_items = [item]
+            for s in range(1, n_cols):
+                if i + s < total:
+                    ni   = ordered_charts[i + s]
+                    n_fw = fw.get(ni[0], False) or (
+                        ni[6] if viewing_saved and len(ni) > 6 else _meta(ni[0])
+                    ).get("full_width", False)
+                    if not n_fw:
+                        row_items.append(ni)
+                    else:
+                        break
+                else:
+                    break
+
+            if len(row_items) > 1:
+                row_cols = st.columns(len(row_items), gap="large")
+                for ci, (ri, rc) in enumerate(zip(row_items, row_cols)):
+                    with rc:
+                        _render_chart(ri, i + ci, total, viewing_saved)
+                st.markdown("<br>", unsafe_allow_html=True)
+                i += len(row_items)
+            else:
+                with st.container():
+                    _render_chart(item, i, total, viewing_saved)
+                st.markdown("<br>", unsafe_allow_html=True)
+                i += 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main page entry
+# ─────────────────────────────────────────────────────────────────────────────
+def page_dashboard():
+    token = st.query_params.get("t","")
+    if token and "user_id" not in st.session_state:
+        r = validate_token(token)
+        if r:
+            st.session_state.user_id  = r[0]
+            st.session_state.username = r[1]
+            st.session_state.page     = "home"; st.rerun()
+
+    viewing_saved = "view_session_id" in st.session_state
+    is_editing    = "editing_session_id" in st.session_state
+    df            = st.session_state.get("df")
+
+    # ── When editing a saved session, restore its KPIs + meta on first load ──
+    if is_editing and "kpis" not in st.session_state:
+        eid = st.session_state.editing_session_id
+        sm  = get_session_meta(eid, st.session_state.get("user_id"))
+        if sm:
+            try:
+                st.session_state.kpis = json.loads(sm.get("kpis_json", "[]"))
+            except Exception:
+                st.session_state.kpis = []
+            if "layout_mode" not in st.session_state:
+                st.session_state.layout_mode = sm.get("layout_mode", "portrait")
+            if "dashboard_title" not in st.session_state:
+                st.session_state.dashboard_title = sm.get("dashboard_title", "")
+
+    # ── When editing, also restore per-chart notes from the saved session ─────
+    if is_editing and not st.session_state.get("_edit_notes_loaded"):
+        eid    = st.session_state.editing_session_id
+        loaded = get_session_charts(eid, st.session_state.get("user_id"))
+        for uid, title, fig, desc, auto, ctype, meta in loaded:
+            # Only seed note if user hasn't already typed something this session
+            note_key = f"desc_{uid}"
+            if note_key not in st.session_state and desc:
+                st.session_state[note_key] = desc
+            # Also restore chart meta (custom title, subtitle etc.) if not set
+            meta_key = f"chart_meta_{uid}"
+            if meta_key not in st.session_state and meta:
+                st.session_state[meta_key] = meta
+        st.session_state._edit_notes_loaded = True
+
+    # Load saved session data once
+    if viewing_saved:
+        sid   = st.session_state.view_session_id
+        sname = st.session_state.get("view_session_name","Saved Session")
+        if "_view_charts" not in st.session_state or \
+                st.session_state.get("_vsid") != sid:
+            loaded = get_session_charts(sid, st.session_state.get("user_id"))
+            # Restore per-chart session_state keys (previously done inside DB layer)
+            for uid, title, fig, desc, auto, ctype, meta in loaded:
+                st.session_state[f"desc_{uid}"]          = desc
+                st.session_state[f"auto_insights_{uid}"] = auto
+                st.session_state[f"chart_type_{uid}"]    = ctype
+                st.session_state[f"chart_meta_{uid}"]    = meta
+            st.session_state._view_charts = loaded
+            st.session_state._vsid        = sid
+        sm = get_session_meta(sid, st.session_state.get("user_id"))
+        if sm is None:
+            st.error("That saved session was not found for this account.")
+            for k in ["view_session_id","_view_charts","_vsid",
+                      "dashboard_title","kpis","layout_mode"]:
+                st.session_state.pop(k, None)
+            st.session_state.page = "home"
+            st.rerun()
+        st.session_state.setdefault("dashboard_title", sm["dashboard_title"])
+        st.session_state.setdefault("layout_mode",     sm["layout_mode"])
+        if "kpis" not in st.session_state:
+            try:   st.session_state.kpis = json.loads(sm["kpis_json"])
+            except Exception: st.session_state.kpis = []
+        df = None  # No live df when viewing saved
+    else:
+        sname = f"Analysis -- {st.session_state.get('file_name','')}"
+
+    charts = _all_charts(viewing_saved)
+
+    render_logo()
+    if st.button("← Back"):
+        if viewing_saved:
+            for k in ["view_session_id","_view_charts","_vsid",
+                      "dashboard_title","kpis","layout_mode"]:
+                st.session_state.pop(k, None)
+            st.session_state.page = "home"
+        else:
+            st.session_state.page = "analysis"
+        st.rerun()
+
+    # ── Dashboard title ───────────────────────────────────────────────────────
+    if not viewing_saved:
+        ti = st.text_input("📋 Dashboard Title",
+                           value=st.session_state.get("dashboard_title",""),
+                           placeholder="e.g. Q1 2025 Sales Dashboard",
+                           key="dbtitle")
+        if ti != st.session_state.get("dashboard_title",""):
+            st.session_state.dashboard_title = ti; _persist()
+
+    display_title = st.session_state.get("dashboard_title") or sname
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    st.markdown(
+        f'<div style="text-align:center;margin-bottom:0.3rem;">'
+        f'<span style="font-size:1.6rem;font-weight:800;color:#4f6ef7;">📊 {escape(display_title)}</span><br>'
+        f'<span style="font-size:0.78rem;color:#94a3b8;">Generated by Lytrize &middot; {now_str}</span>'
+        f'</div>',
+        unsafe_allow_html=True)
+
+    # ── Layout mode ───────────────────────────────────────────────────────────
+    if not viewing_saved:
+        lo = st.radio("📐 Export Layout", ["Portrait","Landscape"],
+                      index=1 if st.session_state.get("layout_mode")=="landscape" else 0,
+                      horizontal=True)
+        st.session_state.layout_mode = lo.lower()
+
+    # ── Save / Update -- at the TOP so it's always visible ────────────────────
+    if not viewing_saved:
+        sc1, sc2, sc3 = st.columns([3,1,1])
+        with sc1:
+            def_name = st.session_state.get("editing_session_name", sname) if is_editing else sname
+            sname_in = st.text_input("Session name", value=def_name, key="sname_in")
+        with sc2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("💾 Save", use_container_width=True):
+                _do_save(sname_in, charts, df)
+        with sc3:
+            if is_editing:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("🔄 Update", use_container_width=True):
+                    _do_update(sname_in, charts)
+
+    st.markdown("---")
+
+    # ── KPIs ─────────────────────────────────────────────────────────────────
+    _render_kpi_section(df, readonly=viewing_saved)
+    st.markdown("---")
+
+    if not charts:
+        st.info("No charts yet. Go back to Analysis to generate some!")
+        inject_footer()
+        return
+
+    # Resolve grid order
+    uid_map   = {c[0]: c for c in charts}
+    go_order  = st.session_state.get("grid_order", [c[0] for c in charts])
+    ordered   = [uid_map[u] for u in go_order if u in uid_map]
+    # Append unplaced
+    placed    = {c[0] for c in ordered}
+    for c in charts:
+        if c[0] not in placed: ordered.append(c)
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    if ordered:
+        _export_row(ordered, sname, viewing_saved)
+        st.markdown("---")
+
+    # ── Layout builder ────────────────────────────────────────────────────────
+    if charts and not viewing_saved:
+        with st.expander("🗂️ Arrange Dashboard Layout", expanded=False):
+            _render_layout_builder(charts)
+        st.markdown("---")
+
+    st.markdown("### 📈 Dashboard")
+    _render_grid(ordered, viewing_saved)
+    inject_footer()
+
+
+def _export_row(charts, sname, viewing_saved):
+    orient     = st.session_state.get("layout_mode","portrait")
+    kpis       = st.session_state.get("kpis",[])
+    dash_title = st.session_state.get("dashboard_title","") or sname
+
+    export_charts = []
+    full_width = st.session_state.get("grid_fullwidth", {})
+    for item in charts:
+        uid  = item[0]
+        meta = dict(item[6] if len(item)>6 else _meta(uid))
+        if full_width.get(uid):
+            meta["full_width"] = True
+        fig  = _apply_axes(item[2], meta.get("x_label",""), meta.get("y_label",""))
+        # Read notes from session_state live so they're always current
+        notes = st.session_state.get(f"desc_{uid}", "") or (item[3] if len(item) > 3 else "")
+        export_charts.append((uid, item[1], fig, notes, item[4] if len(item)>4 else [],
+                              item[5] if len(item)>5 else "", meta))
+
+    e1, e2, _ = st.columns([2,2,4])
+    safe_file = re.sub(r"[^A-Za-z0-9_.-]+", "_", dash_title).strip("._") or "lytrize_report"
+    with e1:
+        html = generate_html_report(export_charts, sname,
+                                    orientation=orient, kpis=kpis,
+                                    dashboard_title=dash_title,
+                                    grid_cols_n=st.session_state.get("grid_cols_n", 2))
+        st.download_button("🌐 Download HTML", html,
+                           file_name=f"{safe_file}.html",
+                           mime="text/html", use_container_width=True)
+    with e2:
+        pk = f"pdf_{sname}"
+        if st.button("📄 Generate PDF", key="gen_pdf", use_container_width=True):
+            with st.spinner("Building PDF…"):
+                try:
+                    st.session_state[pk] = generate_pdf_report(
+                        export_charts, sname, orientation=orient,
+                        kpis=kpis, dashboard_title=dash_title,
+                        grid_cols_n=st.session_state.get("grid_cols_n", 2))
+                except Exception as e:
+                    st.error(f"PDF error: {e}")
+        if pk in st.session_state:
+            st.download_button("⬇️ Download PDF", st.session_state[pk],
+                               file_name=f"{safe_file}.pdf",
+                               mime="application/pdf",
+                               use_container_width=True, key="dl_pdf")
+
+
+def _do_save(sname_in, charts, df):
+    save_session_db(
+        st.session_state.user_id, sname_in,
+        st.session_state.get("file_name",""),
+        df.shape[0] if df is not None else 0,
+        df.shape[1] if df is not None else 0,
+        st.session_state.get("selected_analyses",[]),
+        charts_to_json(st.session_state.get("charts",[])),
+        dashboard_title = st.session_state.get("dashboard_title",""),
+        kpis_json       = json.dumps(st.session_state.get("kpis",[])),
+        layout_mode     = st.session_state.get("layout_mode","portrait"))
+    clear_draft(st.session_state.user_id)
+    st.session_state.pop("editing_session_id",    None)
+    st.session_state.pop("editing_session_name",  None)
+    st.session_state.pop("_edit_notes_loaded",    None)
+    st.success(f"✅ Saved as '{sname_in}'!")
+
+
+def _do_update(sname_in, charts, clear_editing=True):
+    eid = st.session_state.editing_session_id
+    update_session_db(
+        eid, sname_in,
+        charts_to_json(st.session_state.get("charts",[])),
+        st.session_state.get("selected_analyses",[]),
+        st.session_state.user_id,
+        dashboard_title = st.session_state.get("dashboard_title",""),
+        kpis_json       = json.dumps(st.session_state.get("kpis",[])),
+        layout_mode     = st.session_state.get("layout_mode","portrait"))
+    clear_draft(st.session_state.user_id)
+    st.success(f"✅ Updated '{sname_in}'!")
+    if clear_editing:
+        st.session_state.pop("editing_session_id",   None)
+        st.session_state.pop("editing_session_name", None)
