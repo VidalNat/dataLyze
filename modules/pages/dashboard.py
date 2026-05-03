@@ -142,7 +142,7 @@ _KPI_TYPES = [
     "% Change (Latest Month vs Prev Month)", "% Change (Latest Year vs Prev Year)",
 ]
 _KPI_ICONS = {
-    "Total (Sum)":"💰","Average (Mean)":"📊","Median":"📐","Count (Rows)":"🔢",
+    "Total (Sum)":"📜","Average (Mean)":"📊","Median":"📐","Count (Rows)":"🔢",
     "Minimum Value":"⬇️","Maximum Value":"⬆️",
     "% of Total (category share)":"📈","Unique Values Count":"🔍",
     "Date Range":"📅","Top Category → Value":"🏆","Bottom Category → Value":"📉",
