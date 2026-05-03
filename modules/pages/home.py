@@ -157,6 +157,7 @@ def page_home():
                     # from a previously edited session in the same browser tab).
                     st.session_state.pop("_edit_notes_loaded",      None)
                     st.session_state.pop("_analysis_notes_loaded",  None)
+                    st.session_state.pop("_notes_shadow",           None)
                     log_activity(st.session_state.user_id, "session_edit_started",
                                  f"session_id={sid}", sid)
                     st.session_state.page = "analysis"; st.rerun()

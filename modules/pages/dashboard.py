@@ -57,6 +57,22 @@ from modules.ui.css import inject_footer, render_logo
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+def _dash_sync_notes() -> None:
+    """
+    Snapshot all live desc_{uid} note values into _notes_shadow before any
+    st.rerun() that fires mid-page (e.g. KPI add/remove, chart delete from
+    the dashboard).
+
+    Dashboard renders the KPI section BEFORE the chart card loop, so any
+    st.rerun() triggered by a KPI button aborts the run before the text_area
+    widgets are rendered.  Streamlit then clears the widget-bound desc_ keys.
+    The shadow dict is a plain non-widget dict that survives every rerun, so
+    notes can be restored from it when the chart cards next render.
+    """
+    shadow = st.session_state.setdefault("_notes_shadow", {})
+    for k, v in list(st.session_state.items()):
+        if k.startswith("desc_") and isinstance(v, str):
+            shadow[k[5:]] = v   # strip "desc_" prefix → uid
 def _persist():
     uid = st.session_state.get("user_id")
     if not uid:
@@ -126,7 +142,7 @@ _KPI_TYPES = [
     "% Change (Latest Month vs Prev Month)", "% Change (Latest Year vs Prev Year)",
 ]
 _KPI_ICONS = {
-    "Total (Sum)":"💰","Average (Mean)":"📊","Median":"📐","Count (Rows)":"🔢",
+    "Total (Sum)":"📜","Average (Mean)":"📊","Median":"📐","Count (Rows)":"🔢",
     "Minimum Value":"⬇️","Maximum Value":"⬆️",
     "% of Total (category share)":"📈","Unique Values Count":"🔍",
     "Date Range":"📅","Top Category → Value":"🏆","Bottom Category → Value":"📉",
@@ -291,7 +307,10 @@ def _render_kpi_section(df, readonly):
                         gi = kpis.index(kpi)
                         if st.button("✕", key=f"kpi_rm_{gi}", help="Remove KPI",
                                      use_container_width=True):
-                            kpis.pop(gi); _persist(); st.rerun()
+                            kpis.pop(gi)
+                            _dash_sync_notes()
+                            _persist()
+                            st.rerun()
         st.markdown("<br>", unsafe_allow_html=True)
 
     # ── Add new KPI ───────────────────────────────────────────────────────────
@@ -343,7 +362,26 @@ def _render_kpi_section(df, readonly):
             if st.button("➕ Calculate & Add KPI", type="primary", key="kpi_add_btn"):
                 kpi = _calc_kpi(df, ktype, col, grp, met, fcol, fval, klabel or None)
                 st.session_state.kpis.append(kpi)
+                _dash_sync_notes()
                 _persist()
+                # Also write KPIs to the sessions table immediately so they are
+                # not lost if the user closes the tab before clicking Save/Update.
+                eid = st.session_state.get("editing_session_id")
+                if eid:
+                    try:
+                        from modules.database import update_session_db
+                        update_session_db(
+                            eid,
+                            st.session_state.get("editing_session_name", "Session"),
+                            charts_to_json(st.session_state.get("charts", [])),
+                            st.session_state.get("selected_analyses", []),
+                            st.session_state.get("user_id"),
+                            dashboard_title = st.session_state.get("dashboard_title", ""),
+                            kpis_json       = json.dumps(st.session_state.kpis),
+                            layout_mode     = st.session_state.get("layout_mode", "portrait"),
+                        )
+                    except Exception:
+                        pass
                 st.success(f"✅ {kpi['label']}: {kpi['value']}{kpi['suffix']}")
                 st.rerun()
     elif not readonly:
@@ -473,6 +511,7 @@ def _render_layout_builder(charts):
         st.session_state.grid_order     = assigned_uids
         st.session_state.grid_fullwidth = full_width
         st.session_state.grid_cols_n    = grid_cols_n
+        _dash_sync_notes()
         _persist()
         st.success("✅ Layout applied!")
         st.rerun()
@@ -540,6 +579,7 @@ def _chart_settings(uid, title, fig, auto_insights, readonly):
                 (c[0], nt if c[0] == uid else c[1], c[2])
                 for c in charts
             ]
+            _dash_sync_notes()
             _persist()
             st.success("Saved!")
             st.rerun()
@@ -553,8 +593,12 @@ def _render_chart(item, idx, total, viewing_saved):
         item if len(item) == 7 else (*item[:6], {})
     meta = saved_meta if viewing_saved else _meta(uid)
     note_key = f"desc_{uid}"
-    if not viewing_saved and note_key not in st.session_state:
-        st.session_state[note_key] = desc
+    if not viewing_saved:
+        if note_key not in st.session_state or st.session_state[note_key] == "":
+            # Shadow has priority: it holds values typed since the last DB save
+            # and survives KPI-section reruns that fire before chart cards render.
+            shadow_val = st.session_state.get("_notes_shadow", {}).get(uid, "")
+            st.session_state[note_key] = shadow_val or desc or ""
 
     display = meta.get("custom_title") or title
     sub     = meta.get("subtitle","")
@@ -603,7 +647,7 @@ def _render_chart(item, idx, total, viewing_saved):
                     go = st.session_state.get("grid_order",[])
                     gi = next((j for j,u in enumerate(go) if u==uid),-1)
                     if gi > 0: go[gi-1],go[gi] = go[gi],go[gi-1]
-                    _persist(); st.rerun()
+                    _dash_sync_notes(); _persist(); st.rerun()
         with btn_cols[2]:
             if idx < total-1 and st.button("⬇", key=f"dn_{uid}"):
                 cl = st.session_state.get("charts",[])
@@ -613,7 +657,7 @@ def _render_chart(item, idx, total, viewing_saved):
                     go = st.session_state.get("grid_order",[])
                     gi = next((j for j,u in enumerate(go) if u==uid),-1)
                     if gi >= 0 and gi < len(go)-1: go[gi],go[gi+1] = go[gi+1],go[gi]
-                    _persist(); st.rerun()
+                    _dash_sync_notes(); _persist(); st.rerun()
         with btn_cols[3]:
             if st.button("🗑", key=f"rm_{uid}"):
                 st.session_state.charts = [c for c in st.session_state.get("charts",[])
@@ -621,7 +665,8 @@ def _render_chart(item, idx, total, viewing_saved):
                 if "grid_order" in st.session_state:
                     st.session_state.grid_order = [u for u in st.session_state.grid_order
                                                    if u != uid]
-                _persist(); st.rerun()
+                st.session_state.get("_notes_shadow", {}).pop(uid, None)
+                _dash_sync_notes(); _persist(); st.rerun()
 
     # ── Chart title rendered once as a heading (not inside Plotly) ───────────
     st.markdown(
@@ -652,9 +697,13 @@ def _render_chart(item, idx, total, viewing_saved):
                 f'border-radius:6px;padding:.6rem .9rem;font-size:.87rem;margin-top:.3rem;">'
                 f'<strong>Analysis Notes:</strong> {safe_desc}</div>', unsafe_allow_html=True)
     else:
+        def _sync_note(u=uid):   # default-arg captures uid by value
+            val = st.session_state.get(f"desc_{u}", "")
+            st.session_state.setdefault("_notes_shadow", {})[u] = val
         st.text_area(
             "✍️ Analysis Notes",
             key=note_key,
+            on_change=_sync_note,
             placeholder="Add your findings or observations here…")
         if "editing_session_id" in st.session_state:
             if st.button("💾 Update Session Notes", key=f"update_notes_{uid}",
@@ -956,6 +1005,7 @@ def _do_save(sname_in, charts, df):
     st.session_state.pop("editing_session_name",  None)
     st.session_state.pop("_edit_notes_loaded",    None)
     st.session_state.pop("_analysis_notes_loaded", None)
+    st.session_state.pop("_notes_shadow",          None)
     st.success(f"✅ Saved as '{sname_in}'!")
 
 
@@ -965,6 +1015,7 @@ def _do_update(sname_in, charts, clear_editing=True):
     # always in sync with what was actually saved.
     st.session_state.pop("_edit_notes_loaded",      None)
     st.session_state.pop("_analysis_notes_loaded",  None)
+    st.session_state.pop("_notes_shadow",           None)
     eid = st.session_state.editing_session_id
     update_session_db(
         eid, sname_in,

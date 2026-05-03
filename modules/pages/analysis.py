@@ -34,7 +34,7 @@ All config widgets are reactive; options like Top N and Dual Y show/hide instant
 import uuid, json
 import streamlit as st
 import streamlit.components.v1 as _comp
-from modules.database import validate_token, log_activity, save_draft
+from modules.database import validate_token, log_activity, save_draft, update_session_db, get_session_meta
 from modules.analysis import (
     ANALYSIS_OPTIONS, _NEEDS_AXES, _NO_FORM,
     render_config_panel, _collect_kwargs, _run,
@@ -47,21 +47,103 @@ from modules.charts import charts_to_json, clean_insight_text, generate_chart_in
 from modules.ui.css import inject_footer, render_logo
 
 
+def _shadow_notes_sync() -> None:
+    """
+    Copy all live desc_{uid} widget values into st.session_state._notes_shadow.
+
+    _notes_shadow is a plain dict (not widget-keyed) so it survives st.rerun()
+    regardless of whether the text_area widgets are rendered in the current run.
+
+    Call this BEFORE any st.rerun() in an action handler that fires before
+    _render_chart_list is reached — which is every handler in the config panel,
+    the regen panel, and the buttons at the top of each chart card.
+    """
+    shadow = st.session_state.setdefault("_notes_shadow", {})
+    for k, v in list(st.session_state.items()):
+        if k.startswith("desc_") and k not in ("desc_add", "desc_close"):
+            shadow[k[5:]] = v   # strip "desc_" prefix → uid
+
+
+def _sync_one_note(uid: str) -> None:
+    """on_change callback for a single notes text_area.  Writes the new value
+    into the shadow dict immediately so it is never lost to a subsequent rerun."""
+    val = st.session_state.get(f"desc_{uid}", "")
+    st.session_state.setdefault("_notes_shadow", {})[uid] = val
+
+
+def _autosave() -> None:
+    """
+    Persist the current chart/notes state to the database on every meaningful
+    user action (chart add, delete, regen, settings save).
+
+    Two-level write:
+      1. draft_sessions — always written; survives browser refresh.
+      2. sessions table — written when editing_session_id is set, so the saved
+         session is updated in-place and notes are never lost even if the user
+         closes the tab without reaching the dashboard Save button.
+
+    KPI preservation: the analysis page never loads or manages KPIs, so
+    st.session_state.kpis is absent here.  We read the current kpis_json from
+    the DB rather than overwriting it with "[]", which would silently wipe
+    any KPIs the user added on the dashboard.
+    """
+    _shadow_notes_sync()
+    _persist_draft()
+    eid  = st.session_state.get("editing_session_id")
+    uid  = st.session_state.get("user_id")
+    name = st.session_state.get("editing_session_name", "Session")
+    if eid and uid:
+        try:
+            # Preserve KPIs: analysis page never sets st.session_state.kpis, so
+            # if it's absent we must read the saved value rather than write "[]".
+            if "kpis" in st.session_state:
+                kpis_json = json.dumps(st.session_state["kpis"])
+            else:
+                try:
+                    sm = get_session_meta(eid, uid)
+                    kpis_json = sm.get("kpis_json", "[]") if sm else "[]"
+                except Exception:
+                    kpis_json = "[]"
+
+            update_session_db(
+                eid, name,
+                charts_to_json(st.session_state.get("charts", [])),
+                st.session_state.get("selected_analyses", []),
+                uid,
+                dashboard_title = st.session_state.get("dashboard_title", ""),
+                kpis_json       = kpis_json,
+                layout_mode     = st.session_state.get("layout_mode", "portrait"),
+            )
+            try:
+                st.toast("✅ Auto-saved", icon="✅")
+            except Exception:
+                pass  # toast unavailable in older Streamlit builds
+        except Exception:
+            pass  # DB errors must never block the UI
+
+
 def _restore_edit_notes() -> None:
     """
     Re-seed desc_{uid} keys for all charts in the current editing session.
 
-    Called once each time analysis.py is entered in edit mode so that notes
-    written on a previous visit survive Streamlit's widget-key cleanup that
-    happens when the user navigates away to upload.py and back.
+    Checks _notes_shadow first (catches notes typed after the last DB save),
+    then falls back to the sessions table for the initial load.
 
     Guard: skipped when _analysis_notes_loaded is already True so the DB is
-    hit at most once per edit session.  The flag is cleared by home.py's Edit
-    button (via _edit_notes_loaded) and whenever a new editing_session_id is
-    set, ensuring a fresh load for every new edit.
+    hit at most once per edit session.  The flag is cleared by home.py on Edit
+    click, and by _autosave/_do_update after every save.
     """
     if st.session_state.get("_analysis_notes_loaded"):
+        # Shadow dict is always kept current, so re-seed from it on every entry.
+        # This handles the case where the user typed a note, a rerun wiped the
+        # widget key, and they land back on the page — shadow still has the value.
+        shadow = st.session_state.get("_notes_shadow", {})
+        for uid, note in shadow.items():
+            key = f"desc_{uid}"
+            if note and not st.session_state.get(key):
+                st.session_state[key] = note
         return
+
     eid = st.session_state.get("editing_session_id")
     uid = st.session_state.get("user_id")
     if not eid or not uid:
@@ -72,10 +154,12 @@ def _restore_edit_notes() -> None:
         saved = get_session_charts(eid, uid)
         for chart_uid, _title, _fig, desc, _auto, _ctype, _meta in saved:
             note_key = f"desc_{chart_uid}"
-            # Only restore if key is absent or empty-string (Streamlit cleared it).
-            # Never overwrite a note the user has already typed in this session.
-            if desc and not st.session_state.get(note_key):
-                st.session_state[note_key] = desc
+            # Prefer shadow (contains notes typed since last DB save).
+            shadow_val = st.session_state.get("_notes_shadow", {}).get(chart_uid, "")
+            restore_val = shadow_val or desc
+            if restore_val and not st.session_state.get(note_key):
+                st.session_state[note_key] = restore_val
+                st.session_state.setdefault("_notes_shadow", {})[chart_uid] = restore_val
     except Exception:
         pass  # DB errors must never break the analysis page.
     st.session_state["_analysis_notes_loaded"] = True
@@ -152,13 +236,16 @@ def page_analysis():
         c1, c2 = st.columns(2)
         with c1:
             if st.button("📂 Upload Dataset to Add Charts", use_container_width=True):
-                # Persist current notes + chart state to draft before leaving,
-                # so a page refresh during upload doesn't wipe in-progress work.
-                _persist_draft()
+                # Sync shadow + autosave to DB before leaving so notes are safe
+                # even while the upload page is rendered (Streamlit wipes desc_ keys then).
+                _autosave()
+                # Clear the notes-loaded flag so _restore_edit_notes() re-seeds
+                # desc_{uid} keys from shadow + DB when we return.
+                st.session_state.pop("_analysis_notes_loaded", None)
                 st.session_state.page = "upload"; st.rerun()
         with c2:
             if st.button("📊 Go to Dashboard →", use_container_width=True):
-                _persist_draft("dashboard")
+                _autosave()
                 st.session_state.page = "dashboard"; st.rerun()
 
         _render_chart_list(charts, edit_mode=True)
@@ -219,12 +306,13 @@ def page_analysis():
                         st.session_state[f"chart_type_{regen_uid}"] = regen_type
                     st.session_state.pop("_regen_uid",  None)
                     st.session_state.pop("_regen_type", None)
-                    _persist_draft()
+                    _autosave()
                     st.rerun()
             with rb:
                 if st.button("✕ Cancel", key="regen_cancel", use_container_width=True):
                     st.session_state.pop("_regen_uid",  None)
                     st.session_state.pop("_regen_type", None)
+                    _shadow_notes_sync()
                     st.rerun()
 
             st.markdown("---")
@@ -247,6 +335,7 @@ def page_analysis():
                     st.session_state["_active_analysis"] = None
                 else:
                     st.session_state["_active_analysis"] = opt["id"]
+                _shadow_notes_sync()
                 st.rerun()
 
     # ── Active analysis config panel ──────────────────────────────────────────
@@ -278,10 +367,13 @@ def page_analysis():
                     if new_charts:
                         _add_charts(new_charts, active)
                     st.session_state["_active_analysis"] = None
+                    _autosave()
                     st.rerun()
             with c2:
                 if st.button("✕ Close", key="dq_close"):
-                    st.session_state["_active_analysis"] = None; st.rerun()
+                    st.session_state["_active_analysis"] = None
+                    _shadow_notes_sync()
+                    st.rerun()
 
         # ── Descriptive -- no chart output ─────────────────────────────────────
         elif active == "descriptive":
@@ -293,10 +385,14 @@ def page_analysis():
                     if active not in st.session_state.selected_analyses:
                         st.session_state.selected_analyses.append(active)
                     log_activity(st.session_state.get("user_id",0),"analysis_run","type=descriptive")
-                    st.session_state["_active_analysis"] = None; st.rerun()
+                    st.session_state["_active_analysis"] = None
+                    _shadow_notes_sync()
+                    st.rerun()
             with c2:
                 if st.button("✕ Close", key="desc_close"):
-                    st.session_state["_active_analysis"] = None; st.rerun()
+                    st.session_state["_active_analysis"] = None
+                    _shadow_notes_sync()
+                    st.rerun()
 
         # ── All other analysis types -- two-step: configure then generate ──────
         else:
@@ -318,7 +414,9 @@ def page_analysis():
                     use_container_width=True)
 
             if close_clicked:
-                st.session_state["_active_analysis"] = None; st.rerun()
+                st.session_state["_active_analysis"] = None
+                _shadow_notes_sync()
+                st.rerun()
 
             if generate_clicked:
                 kwargs = _collect_kwargs(active, df)
@@ -327,6 +425,7 @@ def page_analysis():
                     if new_charts:
                         _add_charts(new_charts, active)
                     st.session_state["_active_analysis"] = None
+                    _autosave()
                     st.rerun()
 
     # ── Generated charts ──────────────────────────────────────────────────────
@@ -341,7 +440,8 @@ def page_analysis():
                              f"count={len(st.session_state.charts)}")
                 st.session_state.charts = []
                 st.session_state.selected_analyses = []
-                _persist_draft()
+                st.session_state.pop("_notes_shadow", None)   # charts gone, clear shadow too
+                _autosave()
                 st.rerun()
 
         _render_chart_list(st.session_state.charts, edit_mode=is_editing)
@@ -350,7 +450,7 @@ def page_analysis():
         if st.button("🎯 Proceed to Dashboard →", type="primary"):
             log_activity(st.session_state.get("user_id",0),"proceed_to_dashboard",
                          f"charts={len(st.session_state.charts)}")
-            _persist_draft("dashboard")
+            _autosave()
             st.session_state.page = "dashboard"; st.rerun()
 
     inject_footer()
@@ -402,6 +502,7 @@ def _render_chart_list(charts, edit_mode=False):
                         for k in list(st.session_state.keys()):
                             if k.startswith(f"_edit_{uid}_"):
                                 del st.session_state[k]
+                        _shadow_notes_sync()   # protect notes before rerun skips text_areas
                         st.rerun()
                 else:
                     st.button("🔄 Edit Chart", key=f"regen_btn_{uid}",
@@ -412,7 +513,8 @@ def _render_chart_list(charts, edit_mode=False):
                 log_activity(st.session_state.get("user_id",0),"chart_deleted",f"title='{title}'")
                 st.session_state.charts = [c for c in st.session_state.charts if c[0] != uid]
                 st.session_state.pop("_regen_uid", None)
-                _persist_draft()
+                st.session_state.get("_notes_shadow", {}).pop(uid, None)  # clean up shadow entry
+                _autosave()
                 st.rerun()
 
         # ── Chart plot ────────────────────────────────────────────────────────
@@ -495,7 +597,7 @@ def _render_chart_list(charts, edit_mode=False):
                     (c[0], new_title if c[0] == uid else c[1], c[2])
                     for c in st.session_state.get("charts", [])
                 ]
-                _persist_draft()
+                _autosave()
                 st.success("Settings saved!")
                 st.rerun()
 
@@ -506,11 +608,16 @@ def _render_chart_list(charts, edit_mode=False):
                     st.markdown(f"- {clean_insight_text(ins)}")
 
         # ── Analysis Notes ────────────────────────────────────────────────────
+        # Seed from shadow first (survives any rerun), then empty.
+        # Shadow is populated by on_change below and by _autosave()/_restore_edit_notes().
         if f"desc_{uid}" not in st.session_state:
-            st.session_state[f"desc_{uid}"] = ""
+            st.session_state[f"desc_{uid}"] = (
+                st.session_state.get("_notes_shadow", {}).get(uid, ""))
         st.text_area(
-            "✍️ Analysis Notes (saved to Dashboard)",
+            "✍️ Analysis Notes (auto-saved to Dashboard)",
             key=f"desc_{uid}",
-            placeholder="Add your findings here, will replace previous notes…")
+            on_change=_sync_one_note,
+            args=(uid,),
+            placeholder="Add your findings or observations here…")
 
         st.markdown("---")

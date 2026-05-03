@@ -36,11 +36,11 @@ Everything else lives in the **[project Wiki](../../wiki)**:
 
 | Page | What's in it |
 |---|---|
-| [Home](https://github.com/VidalNat/Lytrize/wiki) | Project overview & feature list |
-| [Getting Started](https://github.com/VidalNat/Lytrize/wiki/Getting-started) | Install, run, first use walkthrough |
-| [Configuration](https://github.com/VidalNat/Lytrize/wiki/Configuration) | PostgreSQL, environment variables |
-| [Contributing Guide](https://github.com/VidalNat/Lytrize/wiki/Contributing-guide) | Project structure, Workflow, PR checklist, conventions |
-| [Roadmap](https://github.com/VidalNat/Lytrize/wiki/Roadmap) | Planned features & ideas |
+| [Home](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki) | Project overview & feature list |
+| [Getting Started](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki/Getting-started) | Install, run, first use walkthrough |
+| [Configuration](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki/Configuration) | PostgreSQL, environment variables |
+| [Contributing Guide](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki/Contributing-guide) | Workflow, PR checklist, conventions |
+| [Roadmap](https://github.com/VidalNat/dataLyze-oensource-data_analysis-platform/wiki/Roadmap) | Planned features & ideas |
 
 ## License
 
