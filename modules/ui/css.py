@@ -58,7 +58,7 @@ def inject_css():
   --radius-md: 12px;
   --radius-lg: 18px;
   --radius-xl: 24px;
-  --transition: all 0.2s cubic-bezier(0.4,0,0.2,1);
+  --transition: transform .15s ease, box-shadow .15s ease, background .15s ease, border-color .15s ease, color .1s ease;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -107,26 +107,17 @@ code,pre,.stCode{font-family:var(--font-mono)!important;}
     radial-gradient(ellipse 45% 40% at 50% 95%, rgba(6,182,212,0.11)  0%, transparent 50%),
     radial-gradient(ellipse 65% 55% at 80% 55%, rgba(245,158,11,0.05) 0%, transparent 55%),
     var(--bg) !important;
-  background-attachment: fixed !important;
+  /* background-attachment: fixed removed — caused scroll repaints */
 }
-/* Subtle noise texture */
-.stApp::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.022'/%3E%3C/svg%3E");pointer-events:none;z-index:0;opacity:.35;}
 
-/* ── Page entry animation ─────────────────────────────────────────────── */
+
+/* ── Micro-animations (auth card only, not every rerun) ──────────────── */
 @keyframes fadeUp {
-  from { opacity:0; transform:translateY(14px); }
+  from { opacity:0; transform:translateY(10px); }
   to   { opacity:1; transform:translateY(0);    }
 }
 @keyframes fadeIn {
   from { opacity:0; } to { opacity:1; }
-}
-@keyframes pulse-ring {
-  0%   { transform:scale(1);   opacity:.7; }
-  50%  { transform:scale(1.05);opacity:1;  }
-  100% { transform:scale(1);   opacity:.7; }
-}
-.block-container > div > div {
-  animation: fadeUp 0.35s cubic-bezier(0.4,0,0.2,1) both;
 }
 
 /* ── Layout ───────────────────────────────────────────────────────────── */
@@ -202,16 +193,14 @@ code,pre,.stCode{font-family:var(--font-mono)!important;}
 /* ── GLASS CARDS ──────────────────────────────────────────────────────── */
 .glass-card,.kpi-card,.ag-card,.sess-card,.info-bar,.classifier-box,.themed-box,.metric-card {
   background: var(--surface) !important;
-  backdrop-filter: blur(16px) saturate(180%) !important;
-  -webkit-backdrop-filter: blur(16px) saturate(180%) !important;
   border: 1px solid var(--border-soft) !important;
   border-radius: var(--radius-lg) !important;
   box-shadow: var(--shadow-md) !important;
-  transition: var(--transition);
+  transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
   color: var(--text-primary) !important;
 }
 .glass-card:hover,.ag-card:hover,.sess-card:hover {
-  transform:translateY(-2px);
+  transform:translateY(-1px);
   box-shadow:var(--shadow-lg) !important;
   border-color:var(--border) !important;
 }
@@ -308,7 +297,7 @@ code,pre,.stCode{font-family:var(--font-mono)!important;}
   font-weight: 600 !important;
   font-size: .81rem !important;
   letter-spacing: .01em !important;
-  transition: var(--transition) !important;
+  transition: opacity .1s ease, transform .1s ease, box-shadow .1s ease !important;
   box-shadow: 0 2px 8px rgba(79,110,247,.2) !important;
   padding: .32rem .85rem !important;
   line-height: 1.35 !important;
