@@ -81,28 +81,54 @@ _PG    = DB_URL.startswith(("postgresql://", "postgres://"))
 # Backend-agnostic connection helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+# def _connect():
+#     if _PG:
+#         import psycopg2
+#         url = DB_URL
+#         if "sslmode" not in url:
+#             sep = "&" if "?" in url else "?"
+#             url = url + sep + "sslmode=require"
+#         conn = psycopg2.connect(url)
+#         conn.autocommit = False
+#         # psycopg2 connections have no .execute() — sqlite3 ones do.
+#         # Add it so every conn.execute(sql, params) call in this module
+#         # works without touching any other function.
+#         def _pg_execute(sql, params=()):
+#             cur = conn.cursor()
+#             cur.execute(sql, params)
+#             return cur
+#         conn.execute = _pg_execute
+#         return conn
+#     else:
+#         import sqlite3
+#         return sqlite3.connect(DB_PATH, check_same_thread=False)
 def _connect():
     if _PG:
         import psycopg2
+
         url = DB_URL
         if "sslmode" not in url:
             sep = "&" if "?" in url else "?"
             url = url + sep + "sslmode=require"
-        conn = psycopg2.connect(url)
-        conn.autocommit = False
-        # psycopg2 connections have no .execute() — sqlite3 ones do.
-        # Add it so every conn.execute(sql, params) call in this module
-        # works without touching any other function.
-        def _pg_execute(sql, params=()):
-            cur = conn.cursor()
-            cur.execute(sql, params)
-            return cur
-        conn.execute = _pg_execute
-        return conn
+
+        _raw = psycopg2.connect(url)
+        _raw.autocommit = False
+
+        # psycopg2 is a C extension — can't monkey-patch attributes onto it.
+        # Wrap it in a thin Python class that adds .execute() compatibility.
+        class _PGConn:
+            def __getattr__(self, name):
+                return getattr(_raw, name)
+            def execute(self, sql, params=()):
+                cur = _raw.cursor()
+                cur.execute(sql, params)
+                return cur
+
+        return _PGConn()
     else:
         import sqlite3
         return sqlite3.connect(DB_PATH, check_same_thread=False)
-
+        
 
 def _ph(sql: str) -> str:
     """
