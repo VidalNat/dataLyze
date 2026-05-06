@@ -45,7 +45,7 @@ def page_home():
             st.rerun()
 
     # ── Top navbar ────────────────────────────────────────────────────────────
-    lc1, lc2, lc3, lc4 = st.columns([10, 1.4, 1.4, 1.4])
+    lc1, lc2, lc3, lc4 = st.columns([8, 1.1, 1.1, 1.1])
     with lc1:
         render_logo()
     with lc2:

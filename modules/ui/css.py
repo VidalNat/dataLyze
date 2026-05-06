@@ -133,7 +133,9 @@ code,pre,.stCode{font-family:var(--font-mono)!important;}
 .block-container {
   padding-top: 1.2rem !important;
   padding-bottom: 0 !important;
-  max-width: 1100px !important;
+  max-width: 1380px !important;
+  padding-left: 2.5rem !important;
+  padding-right: 2.5rem !important;
 }
 
 /* ── TOP NAVBAR ───────────────────────────────────────────────────────── */
@@ -304,15 +306,18 @@ code,pre,.stCode{font-family:var(--font-mono)!important;}
   border-radius: var(--radius-md) !important;
   font-family: var(--font-body) !important;
   font-weight: 600 !important;
-  font-size: .88rem !important;
+  font-size: .81rem !important;
   letter-spacing: .01em !important;
   transition: var(--transition) !important;
-  box-shadow: 0 3px 12px rgba(79,110,247,.28) !important;
-  padding: .5rem 1.2rem !important;
+  box-shadow: 0 2px 8px rgba(79,110,247,.2) !important;
+  padding: .32rem .85rem !important;
+  line-height: 1.35 !important;
+  min-height: unset !important;
+  white-space: nowrap !important;
 }
 .stButton > button:hover,.stDownloadButton > button:hover {
   opacity:.9 !important; transform:translateY(-1px) !important;
-  box-shadow: 0 6px 20px rgba(79,110,247,.38) !important;
+  box-shadow: 0 4px 14px rgba(79,110,247,.32) !important;
 }
 .stButton > button:active { transform:translateY(0)!important; box-shadow:none!important; }
 /* Secondary buttons */
@@ -460,6 +465,16 @@ hr { border: none; border-top: 1px solid var(--border-soft); margin: 1.2rem 0; }
 
 /* ── REMOVE STREAMLIT BOTTOM GAP ─────────────────────────────────────── */
 .block-container { padding-bottom: 0 !important; }
+
+/* ── NAVBAR BUTTON OVERRIDES (keep compact, never wrap) ──────────────── */
+/* Target buttons in the very first row of the page (navbar area) */
+div[data-testid="stHorizontalBlock"]:first-of-type .stButton > button {
+  padding: .3rem .75rem !important;
+  font-size: .78rem !important;
+  font-weight: 600 !important;
+  white-space: nowrap !important;
+  min-height: unset !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
