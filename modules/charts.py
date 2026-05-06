@@ -169,9 +169,18 @@ def _fmt_num(value) -> str:
         return "n/a"
     sign = "-" if v < 0 else ""
     av = abs(v)
-    if av >= 1_000_000_000: return f"{sign}{av / 1_000_000_000:.1f}B"
-    if av >= 1_000_000:     return f"{sign}{av / 1_000_000:.1f}M"
-    if av >= 1_000:         return f"{sign}{av / 1_000:.1f}K"
+    if av >= 1_000_000_000:
+        val = av / 1_000_000_000
+        return f"{sign}{val:.2f}".rstrip("0").rstrip(".") + "B"
+
+    if av >= 1_000_000:
+        val = av / 1_000_000
+        return f"{sign}{val:.2f}".rstrip("0").rstrip(".") + "M"
+
+    if av >= 1_000:
+        val = av / 1_000
+        return f"{sign}{val:.2f}".rstrip("0").rstrip(".") + "K"
+
     if av == int(av):       return f"{int(v):,}"
     return f"{v:,.2f}"
 
