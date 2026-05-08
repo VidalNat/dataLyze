@@ -17,8 +17,28 @@ Two operating modes depending on whether a group-by column is selected:
                   compare?" across all metrics.
 """
 
+import streamlit as st
 import plotly.express as px
 from modules.charts import chart_layout, COLORS, num_cols as _num_cols
+
+
+@st.cache_data(show_spinner=False)
+def _agg_grouped(df, grp: str, metric: str, agg: str):
+    """Cached groupby aggregation -- recomputed only when df or params change."""
+    result = df.groupby(grp)[metric].agg(agg).reset_index()
+    result.columns = [grp, f"{agg.title()} {metric}"]
+    return result
+
+
+@st.cache_data(show_spinner=False)
+def _agg_overview(df, num: tuple, agg: str):
+    """Cached overview aggregation across all numeric columns."""
+    cols = list(num)
+    summary = df[cols].agg(agg).reset_index()
+    summary.columns = ["Column", agg.title()]
+    stds = df[cols].std().reset_index()
+    stds.columns = ["Column", "Std Dev"]
+    return summary, stds
 
 
 def run_statistical(df, x_cols=None, y_cols=None, agg="mean", palette=None, **kwargs):
@@ -46,10 +66,9 @@ def run_statistical(df, x_cols=None, y_cols=None, agg="mean", palette=None, **kw
     pal       = palette or COLORS
 
     if grp and grp in df.columns:
-        # ── Grouped mode -- one chart per metric ───────────────────────────────
+        # ── Grouped mode -- one chart per metric (cached aggregation) ──────────
         for metric in num:
-            agg_vals = df.groupby(grp)[metric].agg(agg).reset_index()
-            agg_vals.columns = [grp, f"{agg_label} {metric}"]
+            agg_vals = _agg_grouped(df, grp, metric, agg)
             fig = px.bar(
                 agg_vals, x=grp, y=f"{agg_label} {metric}",
                 title=f"{agg_label} of {metric} by {grp}",
@@ -58,8 +77,8 @@ def run_statistical(df, x_cols=None, y_cols=None, agg="mean", palette=None, **kw
             charts.append((f"{agg_label} by {grp}", fig))
 
     else:
-        # ── Overview mode -- all metrics in one chart ───────────────────────────
-        summary = df[num].agg(agg).reset_index()
+        # ── Overview mode -- all metrics in one chart (cached aggregation) ─────
+        summary, stds = _agg_overview(df, tuple(num), agg)
         summary.columns = ["Column", agg_label]
         fig = px.bar(
             summary, x="Column", y=agg_label,
@@ -68,8 +87,6 @@ def run_statistical(df, x_cols=None, y_cols=None, agg="mean", palette=None, **kw
         fig.update_layout(**chart_layout())
         charts.append((f"{agg_label} Values", fig))
 
-        # Companion standard deviation chart -- helps spot which columns vary most.
-        stds = df[num].std().reset_index()
         stds.columns = ["Column", "Std Dev"]
         fig2 = px.bar(
             stds, x="Column", y="Std Dev",

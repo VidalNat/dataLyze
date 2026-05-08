@@ -59,17 +59,28 @@ def run_outlier(df, x_cols=None, y_cols=None, palette=None, **kwargs):
         hi     = Q3 + 1.5 * IQR
 
         out_mask = (df[col] < lo) | (df[col] > hi)
-        out      = df[out_mask].copy()   # Outlier rows
-        nrm      = df[~out_mask].copy()  # Normal rows
+        # Use .loc views instead of .copy() to avoid doubling memory usage.
+        out_idx  = df.index[out_mask]
+        nrm_idx  = df.index[~out_mask]
+
+        # ── Sample normal points: sending 5 M "normal" dots to the browser is
+        #    unnecessary -- the pattern is clear from a 25 K-point sample.
+        from modules.utils.perf import sample_for_plot as _samp
+        MAX_NRM = 25_000
+        if len(nrm_idx) > MAX_NRM:
+            import numpy as np
+            rng = np.random.default_rng(42)
+            nrm_idx = nrm_idx[rng.choice(len(nrm_idx), MAX_NRM, replace=False)]
+        nrm_sampled = len(nrm_idx) < (~out_mask).sum()
 
         fig = go.Figure()
 
         # ── Normal points -- low-weight dots ───────────────────────────────────
         fig.add_trace(go.Scatter(
-            x=nrm.index,
-            y=nrm[col].values,
+            x=nrm_idx,
+            y=df.loc[nrm_idx, col].values,
             mode="markers",
-            name="Normal",
+            name="Normal" + (f" (25 K sample)" if nrm_sampled else ""),
             marker=dict(color=pal[0], size=4, opacity=0.45),
             hovertemplate=(
                 f"<b>Row:</b> %{{x}}<br>"
@@ -80,8 +91,8 @@ def run_outlier(df, x_cols=None, y_cols=None, palette=None, **kwargs):
 
         # ── Outlier points -- prominent red × markers ──────────────────────────
         fig.add_trace(go.Scatter(
-            x=out.index,
-            y=out[col].values,
+            x=out_idx,
+            y=df.loc[out_idx, col].values,
             mode="markers",
             name="Outlier ⚠️",
             marker=dict(color="#ef4444", size=9, symbol="x"),
@@ -102,7 +113,7 @@ def run_outlier(df, x_cols=None, y_cols=None, palette=None, **kwargs):
             annotation_text=f"Lower IQR boundary: {lo:.2f}",
             annotation_position="bottom right")
 
-        n_out = len(out)
+        n_out = int(out_mask.sum())
         fig.update_layout(
             title=f"Outliers -- {col}  ({n_out} outlier{'s' if n_out != 1 else ''} detected)",
             xaxis_title="Row Index (hover to see exact row number)",

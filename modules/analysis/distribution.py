@@ -33,15 +33,26 @@ def run_distribution(df, x_cols=None, y_cols=None, palette=None, **kwargs):
     num = x_cols or _num_cols()[:6]  # Cap default at 6 to avoid overwhelming output.
     pal = palette or COLORS
 
+    # ── Sample for performance: Plotly still sends raw bin data ────────────────
+    from modules.utils.perf import sample_for_plot
+    plot_df, sampled = sample_for_plot(df, n=100_000)
+    sample_note = f"  (100 K sample of {len(df):,} rows)" if sampled else ""
+
     for i, col in enumerate(num):
         fig = px.histogram(
-            df,
+            plot_df,
             x=col,
-            nbins=35,            # 35 bins is a good default for most datasets.
-            marginal="box",      # Box plot above the histogram for quartile visibility.
-            title=f"Distribution: {col}",
+            nbins=35,
+            marginal="box",
+            title=f"Distribution: {col}" + sample_note,
             color_discrete_sequence=[pal[i % len(pal)]])
         fig.update_layout(**chart_layout())
+        if sampled:
+            fig.add_annotation(
+                text=f"⚠️ Showing 100,000-row sample of {len(df):,} total rows",
+                xref="paper", yref="paper", x=0, y=-0.12,
+                showarrow=False, font=dict(size=10, color="#f59e0b")
+            )
         charts.append((f"Dist: {col}", fig))
 
     return charts

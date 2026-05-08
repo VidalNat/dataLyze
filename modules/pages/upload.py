@@ -35,6 +35,7 @@ from modules.ui.column_tools import show_dtype_transformer, show_column_classifi
 from modules.ui.excel_loader import show_excel_loader
 from modules.ui.css import inject_footer, render_logo, render_page_steps
 from modules.analysis.data_quality import run_data_quality
+from modules.utils.perf import read_csv_fast, mem_mb
 
 
 def _is_excel(name: str) -> bool:
@@ -84,9 +85,15 @@ def page_upload():
 
     if not is_excel:
         if "df" not in st.session_state or file_changed:
-            with st.spinner("Reading file..."):
-                uploaded.seek(0)
-                df = pd.read_csv(uploaded)
+            with st.spinner("Reading & optimising file…"):
+                raw_size = getattr(uploaded, "size", 0) / 1_048_576
+                df       = read_csv_fast(uploaded)
+                opt_mb   = mem_mb(df)
+                if raw_size > 50:
+                    st.toast(
+                        f"✅ Loaded {raw_size:.0f} MB → ~{opt_mb:.0f} MB in-memory after dtype optimisation",
+                        icon="✅",
+                    )
             st.session_state.df        = df
             st.session_state.file_name = uploaded.name
             st.session_state.file_signature = file_sig
@@ -109,7 +116,7 @@ def page_upload():
             st.markdown(
                 '<div style="background:rgba(16,185,129,0.10);border:1px solid rgba(16,185,129,0.25);'
                 'border-radius:12px;padding:0.8rem 1.1rem;margin-bottom:1rem;">'
-                '&#127775; <b>Star schema active</b> -- '
+                '&#127775; <b>Unified table active</b> -- '
                 f'Fact: <b>{safe_fact}</b> joined with '
                 + ", ".join(f"<b>{d}</b>" for d in safe_dims) +
                 f' &nbsp;·&nbsp; {schema_info["shape"][0]:,} rows x {schema_info["shape"][1]} cols'

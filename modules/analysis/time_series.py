@@ -25,8 +25,52 @@ Dual Y-axis:
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import streamlit as st
 from plotly.subplots import make_subplots
 from modules.charts import chart_layout, COLORS
+
+
+@st.cache_data(show_spinner=False)
+def _aggregate_time_series(df, dt_col: str, y_cols: tuple, agg: str,
+                            date_part) -> pd.DataFrame:
+    """
+    Cached groupby aggregation for time series.
+
+    Converting datetime columns and grouping is O(N) on every Streamlit
+    rerun. Caching ensures this runs once per unique (df, parameters)
+    combination.
+    """
+    df = df.copy()
+    if not pd.api.types.is_datetime64_any_dtype(df[dt_col]):
+        df[dt_col] = pd.to_datetime(df[dt_col], errors="coerce")
+
+    metrics = list(y_cols)
+
+    if not date_part:
+        return df[[dt_col] + metrics].dropna(subset=[dt_col]).sort_values(dt_col)
+
+    # Period grouping
+    _MONTH   = {m: i for i, m in enumerate(["January","February","March","April",
+                 "May","June","July","August","September","October","November","December"])}
+    _WEEKDAY = {d: i for i, d in enumerate(["Monday","Tuesday","Wednesday",
+                 "Thursday","Friday","Saturday","Sunday"])}
+
+    tmp = pd.to_datetime(df[dt_col].astype(str), errors="coerce")
+    if date_part == "month_name":
+        df["_p"] = tmp.dt.month_name()
+        grouped = df.groupby("_p")[metrics].agg(agg).reset_index()
+        grouped["_sort"] = grouped["_p"].map(_MONTH).fillna(99)
+        grouped = grouped.sort_values("_sort").drop(columns="_sort")
+    elif date_part == "weekday_name":
+        df["_p"] = tmp.dt.day_name()
+        grouped = df.groupby("_p")[metrics].agg(agg).reset_index()
+        grouped["_sort"] = grouped["_p"].map(_WEEKDAY).fillna(99)
+        grouped = grouped.sort_values("_sort").drop(columns="_sort")
+    else:
+        df["_p"] = tmp.dt.to_period(date_part).astype(str)
+        grouped = df.groupby("_p")[metrics].agg(agg).reset_index()
+        grouped = grouped.sort_values("_p")
+    return grouped
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -46,7 +90,7 @@ _WEEKDAY = {d: i for i, d in enumerate(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_time_series(df, x_cols=None, y_cols=None, agg="mean", date_part=None,
-                    palette=None, dual_y_col=None, **_):
+                    palette=None, dual_y_col=None, dual_y_agg=None, **_):
     """
     Generate time-series line charts for selected numeric metrics.
 
@@ -70,9 +114,15 @@ def run_time_series(df, x_cols=None, y_cols=None, agg="mean", date_part=None,
         list of (title: str, fig: Figure) -- one entry per metric in y_cols.
     """
     charts  = []
-    df      = df.copy()          # Never mutate the caller's DataFrame.
     dt_col  = (x_cols or [None])[0]
-    agg_lbl = agg.title()
+    # Only copy the columns we will actually mutate (dt parsing, period column).
+    # Copying the full 300-400 MB DataFrame is wasteful when we only need 2-3 cols.
+    needed  = list({dt_col} | set(y_cols or [])) if dt_col else list(y_cols or [])
+    needed  = [c for c in needed if c and c in df.columns]
+    df      = df[needed].copy() if needed else df.copy()
+    agg_lbl  = agg.title()
+    sec_agg     = dual_y_agg or agg          # aggregation for secondary metric
+    sec_agg_lbl = sec_agg.title()
     pal     = palette or COLORS
 
     # ── Auto-detect datetime column if not explicitly selected ─────────────────
@@ -154,14 +204,17 @@ def run_time_series(df, x_cols=None, y_cols=None, agg="mean", date_part=None,
 
         if dual_valid:
             if dt_col and plot_x == "_p":
-                g2 = df.groupby("_p")[dual].agg(agg).reset_index()
+                g2 = df.groupby("_p")[dual].agg(sec_agg).reset_index()
                 g2.columns = ["_p", dual]
                 if order_map:
                     g2["_s"] = g2["_p"].map(order_map)
                     g2 = g2.sort_values("_s").drop(columns="_s")
                 else:
                     g2 = g2.sort_values("_p")
-                y2_vals = g2[dual].tolist()
+                # Align secondary to primary by merging on the period key.
+                # This prevents length mismatches when null patterns differ.
+                aligned = g[["_p"]].merge(g2, on="_p", how="left")
+                y2_vals = aligned[dual].tolist()
             elif dt_col:
                 y2_vals = df.sort_values(dt_col)[dual].tolist()
             else:
@@ -178,18 +231,18 @@ def run_time_series(df, x_cols=None, y_cols=None, agg="mean", date_part=None,
             ), secondary_y=False)
             fig.add_trace(go.Scatter(
                 x=x_vals, y=y2_vals, mode="lines+markers",
-                name=f"{agg_lbl} {dual}",
+                name=f"{sec_agg_lbl} {dual}",
                 line=dict(color=c_sec, width=2, dash="dash"),
                 marker=dict(size=5),
             ), secondary_y=True)
             fig.update_layout(
-                title=f"{agg_lbl} {col} & {dual} over {x_label}",
+                title=f"{agg_lbl} {col} & {sec_agg_lbl} {dual} over {x_label}",
                 **chart_layout())
             if plot_x == "_p":
                 # Categorical X-axis -- tell Plotly to preserve the sorted order.
                 fig.update_xaxes(type="category", title_text=x_label)
             fig.update_yaxes(title_text=f"{agg_lbl} {col}", secondary_y=False)
-            fig.update_yaxes(title_text=f"{agg_lbl} {dual}", secondary_y=True)
+            fig.update_yaxes(title_text=f"{sec_agg_lbl} {dual}", secondary_y=True)
 
         else:
             # Single-axis line chart.

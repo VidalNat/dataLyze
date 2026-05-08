@@ -1,72 +1,19 @@
 """
 modules/analysis/__init__.py -- Analysis registry & configuration layer.
-========================================================================
-
 This file is the single source of truth for every analysis type in Lytrize.
 It owns three things:
-
-  1. ANALYSIS_OPTIONS  -- the list of analysis cards shown on the analysis page.
-                         Order here = order rendered in the UI.
-
-  2. _RUNNERS          -- maps each analysis ID → its runner function.
-                         The runner is called when the user clicks "Generate Charts".
-
-  3. render_config_panel / _collect_kwargs -- the configuration UI layer.
-     render_config_panel() draws the settings widgets.
-     _collect_kwargs()     reads them back and builds the kwargs dict for the runner.
-
-──────────────────────────────────────────────────────────────────────────────
-HOW TO ADD A NEW ANALYSIS TYPE  (step-by-step for contributors)
-──────────────────────────────────────────────────────────────────────────────
-
-Step 1 -- Create the runner file:
-    modules/analysis/my_analysis.py
-
-    The runner must be a function with this signature:
-        def run_my_analysis(df, **kwargs) -> list[tuple[str, Figure]]:
-            ...
-            return [(chart_title, plotly_figure), ...]
-
-    Each tuple becomes one chart card on the analysis page.
-    Return an empty list [] if nothing can be plotted (e.g. missing columns).
-
-Step 2 -- Register it in ANALYSIS_OPTIONS (this file, ~line 60):
-    {
-        "id":   "my_analysis",      # unique slug -- used as the key everywhere
-        "icon": "🧩",               # emoji shown on the card
-        "name": "My Analysis",      # display name
-        "desc": "Short description" # subtitle on the card
-    }
-
-Step 3 -- Add it to _RUNNERS (this file, ~line 80):
-    "my_analysis": run_my_analysis,
-
-Step 4 -- Add configuration widgets in render_config_panel() (~line 120):
-    elif aid == "my_analysis":
-        st.multiselect("Columns", num, key=_sk(aid, "cols"))
-
-Step 5 -- Read those widgets in _collect_kwargs() (~line 200):
-    elif aid == "my_analysis":
-        kwargs.update(cols=_g(aid, "cols", []) or num)
-
-That's it. The analysis page will automatically show your card, call your
-configuration widgets, and invoke your runner with the collected kwargs.
-
-──────────────────────────────────────────────────────────────────────────────
-SPECIAL ANALYSIS IDS  (need extra handling in pages/analysis.py)
-──────────────────────────────────────────────────────────────────────────────
-  "data_quality" → listed in _NO_FORM:   rendered without the config form.
-  "descriptive"  → custom code path:     renders a table inline, no chart output.
-
-All other IDs follow the standard two-step flow:
-    configure (render_config_panel) → generate (_run → _RUNNERS[aid])
+  ANALYSIS_OPTIONS  -- the list of analysis cards shown on the analysis page.
+                       Order here = order rendered in the UI.
+  _RUNNERS          -- maps each analysis ID → its runner function.
+                       The runner is called when the user clicks "Generate Charts".
+  render_config_panel / _collect_kwargs -- the configuration UI layer.
+    render_config_panel() draws the settings widgets.
+    _collect_kwargs()     reads them back and builds the kwargs dict for the runner.
 """
-
 import uuid
 import streamlit as st
 
 # ── Individual runner imports ─────────────────────────────────────────────────
-# Each module lives in modules/analysis/<name>.py
 from modules.analysis.descriptive  import run_descriptive
 from modules.analysis.statistical  import run_statistical
 from modules.analysis.distribution import run_distribution
@@ -75,28 +22,25 @@ from modules.analysis.categorical  import run_categorical
 from modules.analysis.pie_chart    import run_pie_chart
 from modules.analysis.time_series  import run_time_series
 from modules.analysis.outlier      import run_outlier, OUTLIER_HELP
-# run_data_quality is imported directly in pages/upload.py -- data quality
-# now lives on the upload page (cleaning step) not the analysis page.
+from modules.analysis.scatter_plot import run_scatter_plot
+from modules.analysis.map_plot     import run_map_plot
+from modules.analysis.matrix_table import run_matrix_table
 
-# Column-list helpers -- read from session_state (set during upload/classify)
 from modules.charts import PALETTES, num_cols as _num_cols, cat_cols as _cat_cols, dt_cols as _dt_cols
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Analysis registry
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ANALYSIS_OPTIONS drives the card grid on the analysis page.
-# To add a new analysis: append a dict here AND add an entry to _RUNNERS below.
+# ── Analysis registry ─────────────────────────────────────────────────────────
 ANALYSIS_OPTIONS = [
-    {"id": "descriptive",  "icon": "🗂️", "name": "Descriptive",      "desc": "Stats table -- numeric cols"},
-    {"id": "statistical",  "icon": "📐", "name": "Statistical",       "desc": "Mean, std, min, max"},
-    {"id": "distribution", "icon": "📊", "name": "Distribution",      "desc": "Histograms & box plots"},
-    {"id": "correlation",  "icon": "🔗", "name": "Correlation",       "desc": "Heatmap & scatter matrix"},
-    {"id": "categorical",  "icon": "🏷️", "name": "Categorical Bar",   "desc": "Vertical & horizontal bars"},
-    {"id": "pie_chart",    "icon": "🍩", "name": "Pie & Donut",       "desc": "Proportion & share analysis"},
-    {"id": "time_series",  "icon": "⏱️", "name": "Time Series",       "desc": "Trends & time patterns"},
-    {"id": "outlier",      "icon": "🚨", "name": "Outlier Detection", "desc": "IQR-based anomaly analysis"},
+    {"id": "descriptive",   "icon": "🗂️", "name": "Descriptive",       "desc": "Stats table -- numeric cols"},
+    {"id": "statistical",   "icon": "📐", "name": "Statistical",        "desc": "Mean, std, min, max"},
+    {"id": "distribution",  "icon": "📊", "name": "Distribution",       "desc": "Histograms & box plots"},
+    {"id": "correlation",   "icon": "🔗", "name": "Correlation",        "desc": "Heatmap & scatter matrix"},
+    {"id": "categorical",   "icon": "🏷️", "name": "Categorical Bar",    "desc": "Vertical & horizontal bars"},
+    {"id": "pie_chart",     "icon": "🍩", "name": "Pie & Donut",        "desc": "Proportion & share analysis"},
+    {"id": "time_series",   "icon": "⏱️", "name": "Time Series",        "desc": "Trends & time patterns"},
+    {"id": "outlier",       "icon": "🚨", "name": "Outlier Detection",  "desc": "IQR-based anomaly analysis"},
+    {"id": "scatter_plot",  "icon": "🔘", "name": "Scatter Plot",       "desc": "Relationship between 2 numeric vars"},
+    {"id": "map_plot",      "icon": "🌍", "name": "Map Visualization",  "desc": "Geo scatter with lat/lon"},
+    {"id": "matrix_table",  "icon": "📋", "name": "Matrix / Pivot Table","desc": "Cross-tabulation & heatmap"},
 ]
 
 _RUNNERS = {
@@ -108,89 +52,197 @@ _RUNNERS = {
     "pie_chart":    run_pie_chart,
     "time_series":  run_time_series,
     "outlier":      run_outlier,
+    "scatter_plot": run_scatter_plot,
+    "map_plot":     run_map_plot,
+    "matrix_table": run_matrix_table,
 }
 
-# Analyses that need axis/column selection via the config panel.
-_NEEDS_AXES = {"statistical", "distribution", "correlation", "categorical",
-               "pie_chart", "time_series", "outlier"}
-
-# Reserved for future analyses that must bypass the standard st.form() wrapper.
+_NEEDS_AXES = {
+    "statistical", "distribution", "correlation", "categorical",
+    "pie_chart", "time_series", "outlier", "scatter_plot", "map_plot", "matrix_table"
+}
 _NO_FORM = set()
 
-# ── Aggregation function labels → pandas method strings ───────────────────────
 _AGG_FUNCS = {
-    "Mean (Avg)": "mean",
-    "Sum":        "sum",
-    "Median":     "median",
-    "Count":      "count",
-    "Min":        "min",
-    "Max":        "max",
+    "Mean (Avg)": "mean", "Sum": "sum", "Median": "median",
+    "Count": "count", "Min": "min", "Max": "max"
 }
 
-# ── Date-part grouping labels → pandas period/alias strings ───────────────────
-# None means "use the raw date column without any grouping".
 _DATE_PARTS = {
-    "None":           None,
-    "Year":           "Y",
-    "Quarter":        "Q",
-    "Month (number)": "M",
-    "Month Name":     "month_name",    # special-cased in time_series.py
-    "Weekday Name":   "weekday_name",  # special-cased in time_series.py
-    "Day":            "D",
-    "Hour":           "H",
+    "None": None, "Year": "Y", "Quarter": "Q", "Month (number)": "M",
+    "Month Name": "month_name", "Weekday Name": "weekday_name",
+    "Day": "D", "Hour": "H"
 }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Session-state helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ── Session-state helpers ─────────────────────────────────────────────────────
 def _sk(aid: str, key: str) -> str:
-    """
-    Build a namespaced session_state key for a widget inside analysis `aid`.
-
-    Using a consistent naming scheme prevents key collisions between different
-    analysis types sharing widget names like "x" or "palette".
-
-    Example: _sk("categorical", "top_n")  →  "_cfg_categorical_top_n"
-    """
     return f"_cfg_{aid}_{key}"
 
-
 def _g(aid: str, key: str, default=None):
-    """
-    Read a widget value from session_state, falling back to `default`.
-
-    Args:
-        aid:     Analysis ID (e.g. "categorical").
-        key:     Widget key suffix (e.g. "top_n").
-        default: Value returned when the key is not yet in session_state.
-    """
     return st.session_state.get(_sk(aid, key), default)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Scoped helpers -- per-chart-uid key prefix so multiple panels never collide
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _sk_uid(uid: str, aid: str, key: str) -> str:
-    """Namespaced key scoped to a specific chart uid for the regenerate panel."""
-    return f"_edit_{uid}_{aid}_{key}"
-
+def sk_uid(uid: str, aid: str, key: str) -> str:
+    return f"edit{uid}_{aid}_{key}"
 
 def _g_uid(uid: str, aid: str, key: str, default=None):
-    return st.session_state.get(_sk_uid(uid, aid, key), default)
+    return st.session_state.get(sk_uid(uid, aid, key), default)
 
-
-def render_config_panel_scoped(uid: str, aid: str, df) -> None:
-    """
-    Same as render_config_panel() but every widget key is scoped to `uid` so
-    multiple charts can have independent regeneration panels without collision.
-    """
+# ── Configuration panel -- widget rendering ───────────────────────────────────
+def render_config_panel(aid: str, df) -> None:
     num, cat, dt, all_cols = _num_cols(), _cat_cols(), _dt_cols(), df.columns.tolist()
     NONE = "None"
-    sk = lambda key: _sk_uid(uid, aid, key)   # noqa: E731
+    st.selectbox("🎨 Colour Palette", list(PALETTES.keys()), key=_sk(aid, "palette"))
+    st.markdown("---")
 
+    if aid == "descriptive":
+        st.info("No configuration needed -- outputs a full stats table.")
+
+    elif aid == "statistical":
+        c1, c2, c3 = st.columns(3)
+        with c1: st.multiselect("Group by (optional)", cat, max_selections=1, key=_sk(aid, "x"))
+        with c2: st.multiselect("Metrics", num, default=num[:4], key=_sk(aid, "y"))
+        with c3: st.selectbox("Aggregation", list(_AGG_FUNCS.keys()), key=_sk(aid, "agg"))
+
+    elif aid == "distribution":
+        c1, c2 = st.columns(2)
+        with c1: st.multiselect("Numeric columns", num, default=num[:4], key=_sk(aid, "x"))
+        with c2: st.multiselect("Colour by (optional)", cat, max_selections=1, key=_sk(aid, "color"))
+
+    elif aid == "correlation":
+        c1, c2 = st.columns(2)
+        with c1: st.multiselect("Columns", num, default=num, key=_sk(aid, "x"))
+        with c2: st.multiselect("Additional (optional)", num, key=_sk(aid, "y"))
+
+    elif aid in ("categorical", "pie_chart"):
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.multiselect("Dimension columns", cat, default=cat[:2], key=_sk(aid, "x"))
+        with c2: st.multiselect("Metric columns (optional)", num, key=_sk(aid, "y"))
+        with c3: st.selectbox("Aggregation", list(_AGG_FUNCS.keys()), key=_sk(aid, "agg"))
+        with c4: st.selectbox("Sort", ["Value ↓", "Value ↑", "Category A→Z", "Category Z→A"], key=_sk(aid, "sort"))
+        st.markdown("---")
+        if aid == "categorical":
+            st.selectbox("📊 Chart Direction", ["Vertical (Column chart)", "Horizontal (Bar chart)"], key=_sk(aid, "direction"))
+        st.markdown("**🔝 Top N Categories**")
+        st.caption("Enter how many top categories to show. Set to 0 to show all categories.")
+        st.number_input("Top N (0 = show all)", min_value=0, max_value=200, step=1, value=0, key=_sk(aid, "top_n"))
+        if aid == "categorical":
+            st.markdown("---")
+            st.markdown("**📊 Dual Y-Axis (Secondary metric as line overlay)**")
+            dual_opts = [NONE] + list(num)
+            st.selectbox("Secondary Y-Axis metric", dual_opts, key=_sk(aid, "dual_y"))
+            st.selectbox("Secondary Aggregation", list(_AGG_FUNCS.keys()), key=_sk(aid, "dual_y_agg"),
+                         help="Aggregation applied to the secondary metric independently from the primary.")
+
+    elif aid == "time_series":
+        dt_candidates = dt if dt else all_cols
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.multiselect("Date / Time column", dt_candidates, default=dt_candidates[:1] if dt_candidates else [], max_selections=1, key=_sk(aid, "x"))
+        with c2: st.multiselect("Primary metric(s)", num, default=num[:2], key=_sk(aid, "y"))
+        with c3: st.selectbox("Date grouping", list(_DATE_PARTS.keys()), key=_sk(aid, "date_part"))
+        with c4: st.selectbox("Aggregation", list(_AGG_FUNCS.keys()), key=_sk(aid, "agg"))
+        st.markdown("---")
+        dual_opts_ts = [NONE] + list(num)
+        st.selectbox("Secondary Y-Axis metric", dual_opts_ts, key=_sk(aid, "dual_y_ts"))
+        st.selectbox("Secondary Aggregation", list(_AGG_FUNCS.keys()), key=_sk(aid, "dual_y_agg_ts"),
+                     help="Aggregation applied to the secondary metric independently from the primary.")
+
+    elif aid == "outlier":
+        c1, c2 = st.columns(2)
+        with c1: st.multiselect("Columns to analyse", num, default=num[:4], key=_sk(aid, "x"))
+        with c2: st.multiselect("Group by (optional)", cat, max_selections=1, key=_sk(aid, "grp"))
+
+    elif aid == "scatter_plot":
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.selectbox("📐 X-Axis (Independent)", num, key=_sk(aid, "x"))
+        with c2: st.selectbox("📈 Y-Axis (Dependent)", num, index=1 if len(num)>1 else 0, key=_sk(aid, "y"))
+        with c3: st.selectbox("🎨 Colour By", [NONE] + cat + num, key=_sk(aid, "color"))
+        with c4: st.selectbox("📏 Size By", [NONE] + num, key=_sk(aid, "size"))
+        st.selectbox("📉 Trendline", ["None", "OLS", "LOWESS"], key=_sk(aid, "trendline"))
+
+    elif aid == "map_plot":
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.selectbox("📍 Latitude", num, key=_sk(aid, "lat"))
+        with c2: st.selectbox("📍 Longitude", num, index=1 if len(num)>1 else 0, key=_sk(aid, "lon"))
+        with c3: st.selectbox("📊 Metric (Size)", num, key=_sk(aid, "size"))
+        with c4: st.selectbox("🎨 Colour By", [NONE] + cat + num, key=_sk(aid, "color"))
+        st.selectbox("🏷️ Hover Label", [NONE] + all_cols, key=_sk(aid, "location"))
+
+    elif aid == "matrix_table":
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.selectbox("📑 Index (Rows)", cat + num, key=_sk(aid, "idx"))
+        with c2: st.selectbox("📑 Columns", cat + num, key=_sk(aid, "cols"))
+        with c3: st.selectbox("📊 Values", num, key=_sk(aid, "vals"))
+        with c4: st.selectbox("⚙️ Aggregation", list(_AGG_FUNCS.keys()), key=_sk(aid, "agg"))
+        st.selectbox("🖼️ Render As", ["Heatmap", "Table"], key=_sk(aid, "view"))
+
+# ── Configuration collection ──────────────────────────────────────────────────
+def _collect_kwargs(aid: str, df) -> dict:
+    num, cat, dt, all_cols = _num_cols(), _cat_cols(), _dt_cols(), df.columns.tolist()
+    NONE = "None"
+    pal_label = _g(aid, "palette", list(PALETTES.keys())[0])
+    palette = PALETTES.get(pal_label, list(PALETTES.values())[0])
+    kwargs = {"palette": palette}
+
+    _sort_map = {
+        "Value ↓": "Value (Desc)", "Value ↑": "Value (Asc)",
+        "Category A→Z": "Category (A-Z)", "Category Z→A": "Category (Z-A)"
+    }
+
+    if aid == "statistical":
+        kwargs.update(x_cols=_g(aid, "x", []) or None, y_cols=_g(aid, "y", num[:4]) or num,
+                      agg=_AGG_FUNCS.get(_g(aid, "agg", "Mean (Avg)"), "mean"))
+    elif aid == "distribution":
+        kwargs.update(x_cols=_g(aid, "x", num[:4]) or num[:4], y_cols=_g(aid, "color", []) or None)
+    elif aid == "correlation":
+        kwargs.update(x_cols=_g(aid, "x", num) or num, y_cols=_g(aid, "y", []) or None)
+    elif aid in ("categorical", "pie_chart"):
+        x = _g(aid, "x", cat[:2]) or cat[:2]
+        y = _g(aid, "y", []) or None
+        agg = _AGG_FUNCS.get(_g(aid, "agg", "Mean (Avg)"), "mean")
+        top_n_v = int(_g(aid, "top_n", 0) or 0)
+        top_n = top_n_v if top_n_v > 0 else None
+        sort_by = _sort_map.get(_g(aid, "sort", "Value ↓"), "Value (Desc)")
+        kwargs.update(x_cols=x, y_cols=y, agg=agg, sort_by=sort_by, top_n=top_n)
+        if aid == "categorical":
+            direction = _g(aid, "direction", "Vertical (Column chart)")
+            raw_dual = _g(aid, "dual_y", NONE)
+            dual_y = None if (not raw_dual or raw_dual == NONE) else raw_dual
+            if dual_y and y and dual_y in (y if isinstance(y, list) else [y]): dual_y = None
+            dual_y_agg = _AGG_FUNCS.get(_g(aid, "dual_y_agg", "Mean (Avg)"), "mean")
+            kwargs.update(direction=direction, dual_y_col=dual_y, dual_y_agg=dual_y_agg)
+    elif aid == "time_series":
+        x = _g(aid, "x", [])
+        y = _g(aid, "y", num[:2]) or num[:2]
+        agg = _AGG_FUNCS.get(_g(aid, "agg", "Mean (Avg)"), "mean")
+        date_part = _DATE_PARTS.get(_g(aid, "date_part", "None"))
+        raw_dual = _g(aid, "dual_y_ts", NONE)
+        dual_y = None if (not raw_dual or raw_dual == NONE) else raw_dual
+        if dual_y and dual_y in (y if isinstance(y, list) else [y]): dual_y = None
+        dual_y_agg = _AGG_FUNCS.get(_g(aid, "dual_y_agg_ts", "Mean (Avg)"), "mean")
+        kwargs.update(x_cols=x or None, y_cols=y, agg=agg, date_part=date_part, dual_y_col=dual_y, dual_y_agg=dual_y_agg)
+    elif aid == "outlier":
+        kwargs.update(x_cols=_g(aid, "x", num[:4]) or num[:4], y_cols=_g(aid, "grp", []) or None)
+    elif aid == "scatter_plot":
+        kwargs.update(x_col=_g(aid, "x", num[0]), y_col=_g(aid, "y", num[1] if len(num)>1 else num[0]),
+                      color_col=_g(aid, "color", NONE), size_col=_g(aid, "size", NONE),
+                      trendline=_g(aid, "trendline", "None"))
+    elif aid == "map_plot":
+        kwargs.update(lat_col=_g(aid, "lat", num[0]), lon_col=_g(aid, "lon", num[1] if len(num)>1 else num[0]),
+                      size_col=_g(aid, "size", NONE), color_col=_g(aid, "color", NONE),
+                      location_col=_g(aid, "location", NONE))
+    elif aid == "matrix_table":
+        kwargs.update(index_col=_g(aid, "idx", cat[0] if cat else df.columns[0]),
+                      columns_col=_g(aid, "cols", cat[1] if len(cat)>1 else df.columns[1]),
+                      values_col=_g(aid, "vals", num[0] if num else None),
+                      agg=_AGG_FUNCS.get(_g(aid, "agg", "Mean (Avg)"), "mean"),
+                      view_type=_g(aid, "view", "Heatmap"))
+    return kwargs
+
+# ── Scoped versions (for chart regeneration panels) ──────────────────────────
+def render_config_panel_scoped(uid: str, aid: str, df) -> None:
+    num, cat, dt, all_cols = _num_cols(), _cat_cols(), _dt_cols(), df.columns.tolist()
+    NONE = "None"
+    sk = lambda key: sk_uid(uid, aid, key)
     st.selectbox("🎨 Colour Palette", list(PALETTES.keys()), key=sk("palette"))
     st.markdown("---")
 
@@ -199,364 +251,127 @@ def render_config_panel_scoped(uid: str, aid: str, df) -> None:
         with c1: st.multiselect("Group by (optional)", cat, max_selections=1, key=sk("x"))
         with c2: st.multiselect("Metrics", num, default=num[:4], key=sk("y"))
         with c3: st.selectbox("Aggregation", list(_AGG_FUNCS.keys()), key=sk("agg"))
-
     elif aid == "distribution":
         c1, c2 = st.columns(2)
         with c1: st.multiselect("Numeric columns", num, default=num[:4], key=sk("x"))
         with c2: st.multiselect("Colour by (optional)", cat, max_selections=1, key=sk("color"))
-
     elif aid == "correlation":
         c1, c2 = st.columns(2)
         with c1: st.multiselect("Columns", num, default=num, key=sk("x"))
         with c2: st.multiselect("Additional (optional)", num, key=sk("y"))
-
     elif aid in ("categorical", "pie_chart"):
         c1, c2, c3, c4 = st.columns(4)
         with c1: st.multiselect("Dimension columns", cat, default=cat[:2], key=sk("x"))
         with c2: st.multiselect("Metric columns (optional)", num, key=sk("y"))
         with c3: st.selectbox("Aggregation", list(_AGG_FUNCS.keys()), key=sk("agg"))
-        with c4: st.selectbox("Sort", ["Value ↓","Value ↑","Category A→Z","Category Z→A"], key=sk("sort"))
+        with c4: st.selectbox("Sort", ["Value ↓", "Value ↑", "Category A→Z", "Category Z→A"], key=sk("sort"))
         st.markdown("---")
-        if aid == "categorical":
-            st.selectbox("📊 Chart Direction",
-                         ["Vertical (Column chart)", "Horizontal (Bar chart)"],
-                         key=sk("direction"))
+        if aid == "categorical": st.selectbox("📊 Chart Direction", ["Vertical", "Horizontal"], key=sk("direction"))
         st.markdown("**🔝 Top N Categories**")
-        st.caption("0 = show all categories")
-        st.number_input("Top N (0 = show all)", min_value=0, max_value=200,
-                        step=1, value=0, key=sk("top_n"))
+        st.number_input("Top N", min_value=0, max_value=200, step=1, value=0, key=sk("top_n"))
         if aid == "categorical":
             st.markdown("---")
-            st.markdown("**📊 Dual Y-Axis (Secondary metric as line overlay)**")
-            dual_opts = [NONE] + list(num)
-            st.selectbox("Secondary Y-Axis metric", dual_opts, key=sk("dual_y"))
-
+            st.selectbox("Secondary Y-Axis", [NONE] + num, key=sk("dual_y"))
+            st.selectbox("Secondary Aggregation", list(_AGG_FUNCS.keys()), key=sk("dual_y_agg"))
     elif aid == "time_series":
         dt_candidates = dt if dt else all_cols
         c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.multiselect("Date / Time column", dt_candidates,
-                           default=dt_candidates[:1] if dt_candidates else [],
-                           max_selections=1, key=sk("x"))
+        with c1: st.multiselect("Date / Time column", dt_candidates, default=dt_candidates[:1] if dt_candidates else [], max_selections=1, key=sk("x"))
         with c2: st.multiselect("Primary metric(s)", num, default=num[:2], key=sk("y"))
         with c3: st.selectbox("Date grouping", list(_DATE_PARTS.keys()), key=sk("date_part"))
         with c4: st.selectbox("Aggregation", list(_AGG_FUNCS.keys()), key=sk("agg"))
         st.markdown("---")
-        dual_opts_ts = [NONE] + list(num)
-        st.selectbox("Secondary Y-Axis metric", dual_opts_ts, key=sk("dual_y_ts"))
-
+        st.selectbox("Secondary Y-Axis", [NONE] + num, key=sk("dual_y_ts"))
+        st.selectbox("Secondary Aggregation", list(_AGG_FUNCS.keys()), key=sk("dual_y_agg_ts"))
     elif aid == "outlier":
         c1, c2 = st.columns(2)
         with c1: st.multiselect("Columns to analyse", num, default=num[:4], key=sk("x"))
         with c2: st.multiselect("Group by (optional)", cat, max_selections=1, key=sk("grp"))
-
+    elif aid == "scatter_plot":
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.selectbox("📐 X-Axis", num, key=sk("x"))
+        with c2: st.selectbox("📈 Y-Axis", num, index=1 if len(num)>1 else 0, key=sk("y"))
+        with c3: st.selectbox("🎨 Colour By", [NONE] + cat + num, key=sk("color"))
+        with c4: st.selectbox("📏 Size By", [NONE] + num, key=sk("size"))
+        st.selectbox("📉 Trendline", ["None", "OLS", "LOWESS"], key=sk("trendline"))
+    elif aid == "map_plot":
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.selectbox("📍 Latitude", num, key=sk("lat"))
+        with c2: st.selectbox("📍 Longitude", num, index=1 if len(num)>1 else 0, key=sk("lon"))
+        with c3: st.selectbox("📊 Metric (Size)", num, key=sk("size"))
+        with c4: st.selectbox("🎨 Colour By", [NONE] + cat + num, key=sk("color"))
+        st.selectbox("🏷️ Hover Label", [NONE] + all_cols, key=sk("location"))
+    elif aid == "matrix_table":
+        c1, c2, c3, c4 = st.columns(4)
+        with c1: st.selectbox("📑 Index", cat + num, key=sk("idx"))
+        with c2: st.selectbox("📑 Columns", cat + num, key=sk("cols"))
+        with c3: st.selectbox("📊 Values", num, key=sk("vals"))
+        with c4: st.selectbox("⚙️ Aggregation", list(_AGG_FUNCS.keys()), key=sk("agg"))
+        st.selectbox("🖼️ Render As", ["Heatmap", "Table"], key=sk("view"))
 
 def _collect_kwargs_scoped(uid: str, aid: str, df) -> dict:
-    """Same as _collect_kwargs() but reads from uid-scoped widget keys."""
     num, cat, dt, all_cols = _num_cols(), _cat_cols(), _dt_cols(), df.columns.tolist()
     NONE = "None"
-    g = lambda key, default=None: _g_uid(uid, aid, key, default)   # noqa: E731
-    _sort_map = {
-        "Value ↓": "Value (Desc)", "Value ↑": "Value (Asc)",
-        "Category A→Z": "Category (A-Z)", "Category Z→A": "Category (Z-A)",
-    }
-
+    g = lambda key, default=None: _g_uid(uid, aid, key, default)
+    _sort_map = {"Value ↓": "Value (Desc)", "Value ↑": "Value (Asc)", "Category A→Z": "Category (A-Z)", "Category Z→A": "Category (Z-A)"}
     pal_label = g("palette", list(PALETTES.keys())[0])
     kwargs = {"palette": PALETTES.get(pal_label, list(PALETTES.values())[0])}
 
     if aid == "statistical":
-        kwargs.update(x_cols=g("x",[]) or None, y_cols=g("y",num[:4]) or num,
-                      agg=_AGG_FUNCS.get(g("agg","Mean (Avg)"), "mean"))
+        kwargs.update(x_cols=g("x",[]) or None, y_cols=g("y",num[:4]) or num, agg=_AGG_FUNCS.get(g("agg", "Mean (Avg)"), "mean"))
     elif aid == "distribution":
-        color = g("color",[])
-        kwargs.update(x_cols=g("x",num[:4]) or num[:4], y_cols=color or None)
+        kwargs.update(x_cols=g("x",num[:4]) or num[:4], y_cols=g("color",[]) or None)
     elif aid == "correlation":
         kwargs.update(x_cols=g("x",num) or num, y_cols=g("y",[]) or None)
-    elif aid in ("categorical","pie_chart"):
-        x = g("x",cat[:2]) or cat[:2]
-        y = g("y",[]) or None
-        agg = _AGG_FUNCS.get(g("agg","Mean (Avg)"), "mean")
-        top_n_v = int(g("top_n",0) or 0)
-        top_n = top_n_v if top_n_v > 0 else None
-        sort_by = _sort_map.get(g("sort","Value ↓"), "Value (Desc)")
-        kwargs.update(x_cols=x, y_cols=y, agg=agg, sort_by=sort_by, top_n=top_n)
+    elif aid in ("categorical", "pie_chart"):
+        x = g("x", cat[:2]) or cat[:2]
+        y = g("y", []) or None
+        kwargs.update(x_cols=x, y_cols=y,
+                      agg=_AGG_FUNCS.get(g("agg", "Mean (Avg)"), "mean"),
+                      sort_by=_sort_map.get(g("sort", "Value ↓"), "Value (Desc)"),
+                      top_n=g("top_n", 0) or None)
         if aid == "categorical":
-            direction = g("direction","Vertical (Column chart)")
+            direction = g("direction", "Vertical (Column chart)")
             raw_dual = g("dual_y", NONE)
             dual_y = None if (not raw_dual or raw_dual == NONE) else raw_dual
-            if dual_y and y and dual_y in (y if isinstance(y,list) else [y]):
-                dual_y = None
-            kwargs.update(direction=direction, dual_y_col=dual_y)
-    elif aid == "time_series":
-        x = g("x",[])
-        y = g("y",num[:2]) or num[:2]
-        agg = _AGG_FUNCS.get(g("agg","Mean (Avg)"), "mean")
-        date_part = _DATE_PARTS.get(g("date_part","None"))
-        raw_dual = g("dual_y_ts", NONE)
-        dual_y = None if (not raw_dual or raw_dual == NONE) else raw_dual
-        if dual_y and dual_y in (y if isinstance(y,list) else [y]):
-            dual_y = None
-        kwargs.update(x_cols=x or None, y_cols=y, agg=agg,
-                      date_part=date_part, dual_y_col=dual_y)
-    elif aid == "outlier":
-        g2 = g("grp",[])
-        kwargs.update(x_cols=g("x",num[:4]) or num[:4], y_cols=g2 or None)
-
-    return kwargs
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Configuration panel -- widget rendering
-# ─────────────────────────────────────────────────────────────────────────────
-
-def render_config_panel(aid: str, df) -> None:
-    """
-    Render configuration widgets for the analysis identified by `aid`.
-
-    Design rules:
-      - ALL widgets are ALWAYS visible -- no show/hide conditionals that react
-        to other widget values during the same rerun. This avoids the Streamlit
-        "missing key" crash caused by widgets appearing/disappearing mid-rerun.
-      - Every widget uses _sk(aid, key) as its Streamlit key so values persist
-        across reruns and are accessible via _collect_kwargs().
-      - This function returns nothing; the caller reads config via _collect_kwargs().
-
-    Args:
-        aid: Analysis ID string (e.g. "categorical", "time_series").
-        df:  The working DataFrame from st.session_state.df.
-    """
-    num, cat, dt, all_cols = _num_cols(), _cat_cols(), _dt_cols(), df.columns.tolist()
-    NONE = "None"  # Sentinel string used in "no secondary column" selectboxes.
-
-    # Colour palette selector -- shown for every analysis that has a config panel.
-    st.selectbox("🎨 Colour Palette", list(PALETTES.keys()), key=_sk(aid, "palette"))
-    st.markdown("---")
-
-    # ── Descriptive ───────────────────────────────────────────────────────────
-    # No configuration needed -- the runner outputs a full pandas describe() table.
-    if aid == "descriptive":
-        st.info("No configuration needed -- outputs a full stats table.")
-
-    # ── Statistical ───────────────────────────────────────────────────────────
-    # Aggregates numeric metrics, optionally grouped by one categorical column.
-    elif aid == "statistical":
-        c1, c2, c3 = st.columns(3)
-        with c1: st.multiselect("Group by (optional)", cat, max_selections=1, key=_sk(aid, "x"))
-        with c2: st.multiselect("Metrics", num, default=num[:4], key=_sk(aid, "y"))
-        with c3: st.selectbox("Aggregation", list(_AGG_FUNCS.keys()), key=_sk(aid, "agg"))
-
-    # ── Distribution ──────────────────────────────────────────────────────────
-    # Histograms with box-plot marginals for each selected numeric column.
-    elif aid == "distribution":
-        c1, c2 = st.columns(2)
-        with c1: st.multiselect("Numeric columns", num, default=num[:4], key=_sk(aid, "x"))
-        with c2: st.multiselect("Colour by (optional)", cat, max_selections=1, key=_sk(aid, "color"))
-
-    # ── Correlation ───────────────────────────────────────────────────────────
-    # Pearson correlation heatmap. Requires at least 2 numeric columns.
-    elif aid == "correlation":
-        c1, c2 = st.columns(2)
-        with c1: st.multiselect("Columns", num, default=num, key=_sk(aid, "x"))
-        with c2: st.multiselect("Additional (optional)", num, key=_sk(aid, "y"))
-
-    # ── Categorical Bar & Pie / Donut ─────────────────────────────────────────
-    # Both share dimension / metric / aggregation / sort selectors.
-    # Categorical adds direction (vertical/horizontal) and dual Y-axis.
-    # Pie adds "Other" grouping for categories beyond Top N.
-    elif aid in ("categorical", "pie_chart"):
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: st.multiselect("Dimension columns", cat, default=cat[:2], key=_sk(aid, "x"))
-        with c2: st.multiselect("Metric columns (optional)", num, key=_sk(aid, "y"))
-        with c3: st.selectbox("Aggregation", list(_AGG_FUNCS.keys()), key=_sk(aid, "agg"))
-        with c4: st.selectbox(
-            "Sort", ["Value ↓", "Value ↑", "Category A→Z", "Category Z→A"],
-            key=_sk(aid, "sort"))
-        st.markdown("---")
-
-        # Categorical-only: chart orientation toggle.
-        if aid == "categorical":
-            st.selectbox(
-                "📊 Chart Direction",
-                ["Vertical (Column chart)", "Horizontal (Bar chart)"],
-                key=_sk(aid, "direction"),
-                help="Vertical = column chart. Horizontal = bar chart with values outside tips.")
-
-        # Top-N -- always a number_input (0 = show all).
-        # Using number_input instead of a conditional checkbox avoids key-missing crashes.
-        st.markdown("**🔝 Top N Categories**")
-        st.caption("Enter how many top categories to show. Set to 0 to show all categories.")
-        st.number_input(
-            "Top N (0 = show all)", min_value=0, max_value=200, step=1, value=0,
-            key=_sk(aid, "top_n"),
-            help="0 = no limit. e.g. 10 = show only the 10 highest-value categories.")
-
-        # Dual Y-axis -- categorical only; selectbox with "None" sentinel.
-        if aid == "categorical":
-            st.markdown("---")
-            st.markdown("**📊 Dual Y-Axis (Secondary metric as line overlay)**")
-            st.caption("Choose a secondary metric to overlay as a line on a second Y-axis. Select 'None' to disable.")
-            dual_opts = [NONE] + list(num)
-            st.selectbox(
-                "Secondary Y-Axis metric", dual_opts, key=_sk(aid, "dual_y"),
-                help="Primary metric → bars. Secondary metric → line on the right Y-axis.")
-
-    # ── Time Series ───────────────────────────────────────────────────────────
-    # Line charts over time with optional date-part grouping and dual Y-axis.
-    elif aid == "time_series":
-        dt_candidates = dt if dt else all_cols
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.multiselect(
-                "Date / Time column", dt_candidates,
-                default=dt_candidates[:1] if dt_candidates else [],
-                max_selections=1, key=_sk(aid, "x"))
-        with c2: st.multiselect("Primary metric(s)", num, default=num[:2], key=_sk(aid, "y"))
-        with c3: st.selectbox("Date grouping", list(_DATE_PARTS.keys()), key=_sk(aid, "date_part"))
-        with c4: st.selectbox("Aggregation", list(_AGG_FUNCS.keys()), key=_sk(aid, "agg"))
-        st.markdown("---")
-
-        # Dual Y -- always-visible selectbox with "None" sentinel (see note above).
-        st.markdown("**📊 Dual Y-Axis (Secondary metric as dashed line)**")
-        st.caption("Choose a secondary metric on the right Y-axis. Select 'None' to disable.")
-        dual_opts_ts = [NONE] + list(num)
-        st.selectbox(
-            "Secondary Y-Axis metric", dual_opts_ts, key=_sk(aid, "dual_y_ts"),
-            help="Adds a second line on the right axis.")
-
-    # ── Outlier Detection ─────────────────────────────────────────────────────
-    # IQR-based scatter plots flagging values outside 1.5×IQR boundaries.
-    elif aid == "outlier":
-        c1, c2 = st.columns(2)
-        with c1: st.multiselect("Columns to analyse", num, default=num[:4], key=_sk(aid, "x"))
-        with c2: st.multiselect("Group by (optional)", cat, max_selections=1, key=_sk(aid, "grp"))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Configuration collection -- reading widget values → kwargs dict
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _collect_kwargs(aid: str, df) -> dict:
-    """
-    Read widget values from session_state and return a kwargs dict for the runner.
-
-    Called immediately before _run() to translate the user's configuration
-    choices into typed Python arguments understood by each analysis runner.
-
-    Args:
-        aid: Analysis ID (e.g. "categorical").
-        df:  The working DataFrame (used to infer defaults when selection is empty).
-
-    Returns:
-        dict of keyword arguments passed to the runner via **kwargs.
-    """
-    num, cat, dt, all_cols = _num_cols(), _cat_cols(), _dt_cols(), df.columns.tolist()
-    NONE = "None"
-
-    # Resolve palette -- always present because the selectbox is shown for all analyses.
-    pal_label = _g(aid, "palette", list(PALETTES.keys())[0])
-    palette   = PALETTES.get(pal_label, list(PALETTES.values())[0])
-    kwargs    = {"palette": palette}
-
-    # Sort label → internal sort key used by categorical / pie runners.
-    _sort_map = {
-        "Value ↓":       "Value (Desc)",
-        "Value ↑":       "Value (Asc)",
-        "Category A→Z":  "Category (A-Z)",
-        "Category Z→A":  "Category (Z-A)",
-    }
-
-    # ── Statistical ───────────────────────────────────────────────────────────
-    if aid == "statistical":
-        x   = _g(aid, "x", [])
-        y   = _g(aid, "y", num[:4]) or num
-        agg = _AGG_FUNCS.get(_g(aid, "agg", "Mean (Avg)"), "mean")
-        kwargs.update(x_cols=x or None, y_cols=y, agg=agg)
-
-    # ── Distribution ──────────────────────────────────────────────────────────
-    elif aid == "distribution":
-        x     = _g(aid, "x", num[:4]) or num[:4]
-        color = _g(aid, "color", [])
-        kwargs.update(x_cols=x, y_cols=color or None)
-
-    # ── Correlation ───────────────────────────────────────────────────────────
-    elif aid == "correlation":
-        x = _g(aid, "x", num) or num
-        y = _g(aid, "y", [])
-        kwargs.update(x_cols=x, y_cols=y or None)
-
-    # ── Categorical & Pie ─────────────────────────────────────────────────────
-    elif aid in ("categorical", "pie_chart"):
-        x        = _g(aid, "x", cat[:2]) or cat[:2]
-        y        = _g(aid, "y", []) or None
-        agg      = _AGG_FUNCS.get(_g(aid, "agg", "Mean (Avg)"), "mean")
-        raw_sort = _g(aid, "sort", "Value ↓")
-        sort_by  = _sort_map.get(raw_sort, "Value (Desc)")
-        top_n_v  = int(_g(aid, "top_n", 0) or 0)
-        top_n    = top_n_v if top_n_v > 0 else None  # 0 → None means "show all"
-        kwargs.update(x_cols=x, y_cols=y, agg=agg, sort_by=sort_by, top_n=top_n)
-
-        if aid == "categorical":
-            direction = _g(aid, "direction", "Vertical (Column chart)")
-            raw_dual  = _g(aid, "dual_y", NONE)
-            dual_y    = None if (not raw_dual or raw_dual == NONE) else raw_dual
-            # Prevent the secondary metric from being the same as the primary.
             if dual_y and y and dual_y in (y if isinstance(y, list) else [y]):
                 dual_y = None
-            kwargs.update(direction=direction, dual_y_col=dual_y)
-
-    # ── Time Series ───────────────────────────────────────────────────────────
+            dual_y_agg = _AGG_FUNCS.get(g("dual_y_agg", "Mean (Avg)"), "mean")
+            kwargs.update(direction=direction, dual_y_col=dual_y, dual_y_agg=dual_y_agg)
     elif aid == "time_series":
-        x         = _g(aid, "x", [])
-        y         = _g(aid, "y", num[:2]) or num[:2]
-        agg       = _AGG_FUNCS.get(_g(aid, "agg", "Mean (Avg)"), "mean")
-        date_part = _DATE_PARTS.get(_g(aid, "date_part", "None"))
-        raw_dual  = _g(aid, "dual_y_ts", NONE)
-        dual_y    = None if (not raw_dual or raw_dual == NONE) else raw_dual
-        # Prevent secondary from being the same column as any primary metric.
+        x = g("x", [])
+        y = g("y", num[:2]) or num[:2]
+        agg = _AGG_FUNCS.get(g("agg", "Mean (Avg)"), "mean")
+        date_part = _DATE_PARTS.get(g("date_part", "None"))
+        raw_dual = g("dual_y_ts", NONE)
+        dual_y = None if (not raw_dual or raw_dual == NONE) else raw_dual
         if dual_y and dual_y in (y if isinstance(y, list) else [y]):
             dual_y = None
+        dual_y_agg = _AGG_FUNCS.get(g("dual_y_agg_ts", "Mean (Avg)"), "mean")
         kwargs.update(x_cols=x or None, y_cols=y, agg=agg,
-                      date_part=date_part, dual_y_col=dual_y)
-
-    # ── Outlier ───────────────────────────────────────────────────────────────
+                      date_part=date_part, dual_y_col=dual_y, dual_y_agg=dual_y_agg)
     elif aid == "outlier":
-        x = _g(aid, "x", num[:4]) or num[:4]
-        g = _g(aid, "grp", [])
-        kwargs.update(x_cols=x, y_cols=g or None)
-
+        kwargs.update(x_cols=g("x",num[:4]) or num[:4], y_cols=g("grp",[]) or None)
+    elif aid == "scatter_plot":
+        kwargs.update(x_col=g("x", num[0]), y_col=g("y", num[1] if len(num)>1 else num[0]),
+                      color_col=g("color", NONE), size_col=g("size", NONE), trendline=g("trendline", "None"))
+    elif aid == "map_plot":
+        kwargs.update(lat_col=g("lat", num[0]), lon_col=g("lon", num[1] if len(num)>1 else num[0]),
+                      size_col=g("size", NONE), color_col=g("color", NONE), location_col=g("location", NONE))
+    elif aid == "matrix_table":
+        kwargs.update(index_col=g("idx", cat[0] if cat else df.columns[0]),
+                      columns_col=g("cols", cat[1] if len(cat)>1 else df.columns[1]),
+                      values_col=g("vals", num[0] if num else None),
+                      agg=_AGG_FUNCS.get(g("agg", "Mean (Avg)"), "mean"),
+                      view_type=g("view", "Heatmap"))
     return kwargs
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Runner dispatcher
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ── Runner dispatcher ─────────────────────────────────────────────────────────
 def _run(aid: str, df, **kwargs):
-    """
-    Dispatch to the correct runner and return a list of (uid, title, fig) tuples.
-
-    Args:
-        aid:    Analysis ID (must be a key in _RUNNERS).
-        df:     The working DataFrame.
-        **kwargs: Collected from _collect_kwargs(); forwarded to the runner.
-
-    Returns:
-        list of (uid: str, title: str, fig: Figure) ready to append to charts.
-        Returns None if the runner raises an error (caller shows st.error).
-
-    Notes:
-        - descriptive and data_quality runners only accept df (no kwargs).
-          All others receive **kwargs.
-        - UIDs are 8-character hex strings; short enough to be readable in
-          session_state keys but unique enough for typical session sizes.
-    """
     fn = _RUNNERS.get(aid)
-    if not fn:
-        return []
+    if not fn: return []
     try:
-        # Analyses that render inline (no kwargs) vs. chart-producing analyses.
         raw = fn(df) if aid in ("descriptive", "data_quality") else fn(df, **kwargs)
-        # Wrap each (title, fig) tuple with a fresh unique ID.
         return [(str(uuid.uuid4())[:8], title, fig) for title, fig in raw]
     except Exception as e:
         st.error(f"Analysis error ({aid}): {e}")
