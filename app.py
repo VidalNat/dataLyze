@@ -44,6 +44,8 @@ CONTRIBUTING -- adding a new page
 import streamlit as st
 import warnings
 import json
+from dotenv import load_dotenv
+load_dotenv()
 
 warnings.filterwarnings("ignore")
 
