@@ -4,3 +4,4 @@ plotly
 openpyxl
 streamlit-cookies-manager
 psycopg2-binary
+#python-dotenv -- _or loading environment variables locally, but not needed in  Streamlit Cloud
