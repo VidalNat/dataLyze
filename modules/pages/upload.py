@@ -33,9 +33,8 @@ from html import escape
 from modules.ui.column_manager import show_column_manager
 from modules.ui.column_tools import show_dtype_transformer, show_column_classifier
 from modules.ui.excel_loader import show_excel_loader
-from modules.ui.css import inject_footer, render_logo, render_page_steps
+from modules.ui.css import inject_footer, render_logo
 from modules.analysis.data_quality import run_data_quality
-from modules.utils.perf import read_csv_fast, mem_mb
 
 
 def _is_excel(name: str) -> bool:
@@ -51,15 +50,13 @@ def _uploaded_signature(uploaded) -> str:
 
 
 def page_upload():
-    # Top nav row
-    nc1, nc2 = st.columns([10, 1.5])
-    with nc1:
-        render_logo()
-    with nc2:
-        if st.button("← Home", use_container_width=True):
-            st.session_state.page = "home"; st.rerun()
+    render_logo()
 
-    render_page_steps("upload")
+    if st.button("← Home"):
+        st.session_state.page = "home"; st.rerun()
+
+    st.markdown("## 📂 Upload Dataset")
+
     # Show editing context if in edit mode
     if "editing_session_id" in st.session_state:
         fname = st.session_state.get("editing_file_name", "the original file")
@@ -85,15 +82,9 @@ def page_upload():
 
     if not is_excel:
         if "df" not in st.session_state or file_changed:
-            with st.spinner("Reading & optimising file…"):
-                raw_size = getattr(uploaded, "size", 0) / 1_048_576
-                df       = read_csv_fast(uploaded)
-                opt_mb   = mem_mb(df)
-                if raw_size > 50:
-                    st.toast(
-                        f"✅ Loaded {raw_size:.0f} MB → ~{opt_mb:.0f} MB in-memory after dtype optimisation",
-                        icon="✅",
-                    )
+            with st.spinner("Reading file..."):
+                uploaded.seek(0)
+                df = pd.read_csv(uploaded)
             st.session_state.df        = df
             st.session_state.file_name = uploaded.name
             st.session_state.file_signature = file_sig
@@ -116,7 +107,7 @@ def page_upload():
             st.markdown(
                 '<div style="background:rgba(16,185,129,0.10);border:1px solid rgba(16,185,129,0.25);'
                 'border-radius:12px;padding:0.8rem 1.1rem;margin-bottom:1rem;">'
-                '&#127775; <b>Unified table active</b> -- '
+                '&#127775; <b>Star schema active</b> -- '
                 f'Fact: <b>{safe_fact}</b> joined with '
                 + ", ".join(f"<b>{d}</b>" for d in safe_dims) +
                 f' &nbsp;·&nbsp; {schema_info["shape"][0]:,} rows x {schema_info["shape"][1]} cols'
@@ -138,18 +129,26 @@ def page_upload():
 
 def _show_analysis_pipeline(df: pd.DataFrame, file_name: str):
     st.markdown("---")
-    st.markdown(
-        f"**{file_name}** — {df.shape[0]:,} rows × {df.shape[1]} columns"
-    )
+    st.success(f"✅ **{file_name}** -- {df.shape[0]:,} rows × {df.shape[1]} columns")
     st.dataframe(df.head(), use_container_width=True)
 
-    # ── Data Quality (fragment — reruns independently from the rest) ──────────
+    # ── Data Quality (first — clean before you analyse) ───────────────────────
     st.markdown("### 🧹 Data Quality")
     st.caption(
         "Review missing values and duplicate rows before analysis. "
         "Fixing data issues here gives you cleaner charts and more reliable insights."
     )
-    run_data_quality(df)   # @st.fragment — only this block reruns on widget changes
+    dq_charts = run_data_quality(df)
+    # Show the summary charts (missing % bar + heatmap + duplicate donut) inline
+    if dq_charts:
+        dq_cols = st.columns(min(len(dq_charts), 3))
+        for i, (ch_title, ch_fig) in enumerate(dq_charts):
+            with dq_cols[i % 3]:
+                st.markdown(
+                    f'<div style="font-size:0.82rem;font-weight:600;'
+                    f'opacity:0.7;margin-bottom:0.2rem;">{ch_title}</div>',
+                    unsafe_allow_html=True)
+                st.plotly_chart(ch_fig, use_container_width=True)
 
     st.markdown("---")
 
@@ -172,7 +171,7 @@ def _show_analysis_pipeline(df: pd.DataFrame, file_name: str):
             )
         if st.button("💾 Save Column Descriptions", key="save_col_descs"):
             st.session_state.col_descriptions = col_descs
-            st.toast("Column descriptions saved.", icon="💾")
+            st.success("✅ Column descriptions saved.")
 
 
 def _clear_excel_state(new_file_name: str = ""):

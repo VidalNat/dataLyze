@@ -38,12 +38,7 @@ def run_correlation(df, x_cols=None, y_cols=None, palette=None, **kwargs):
         return charts  # Caller handles the empty result -- no error raised here.
 
     pal  = palette or COLORS
-
-    # ── Sample for performance: .corr() on 5 M rows takes 30+ seconds.
-    #    Pearson correlation stabilises well above 50 K rows -- no loss of insight.
-    from modules.utils.perf import sample_for_plot
-    corr_df, sampled = sample_for_plot(df[num], n=100_000)
-    corr = corr_df.corr()  # Pearson by default.
+    corr = df[num].corr()  # Pearson by default.
 
     fig = px.imshow(
         corr,

@@ -74,9 +74,8 @@ from modules.analysis.correlation  import run_correlation
 from modules.analysis.categorical  import run_categorical
 from modules.analysis.pie_chart    import run_pie_chart
 from modules.analysis.time_series  import run_time_series
+from modules.analysis.data_quality import run_data_quality
 from modules.analysis.outlier      import run_outlier, OUTLIER_HELP
-# run_data_quality is imported directly in pages/upload.py -- data quality
-# now lives on the upload page (cleaning step) not the analysis page.
 
 # Column-list helpers -- read from session_state (set during upload/classify)
 from modules.charts import PALETTES, num_cols as _num_cols, cat_cols as _cat_cols, dt_cols as _dt_cols
@@ -90,6 +89,7 @@ from modules.charts import PALETTES, num_cols as _num_cols, cat_cols as _cat_col
 # To add a new analysis: append a dict here AND add an entry to _RUNNERS below.
 ANALYSIS_OPTIONS = [
     {"id": "descriptive",  "icon": "🗂️", "name": "Descriptive",      "desc": "Stats table -- numeric cols"},
+    {"id": "data_quality", "icon": "🧹", "name": "Data Quality",      "desc": "Missing values & duplicates"},
     {"id": "statistical",  "icon": "📐", "name": "Statistical",       "desc": "Mean, std, min, max"},
     {"id": "distribution", "icon": "📊", "name": "Distribution",      "desc": "Histograms & box plots"},
     {"id": "correlation",  "icon": "🔗", "name": "Correlation",       "desc": "Heatmap & scatter matrix"},
@@ -99,8 +99,12 @@ ANALYSIS_OPTIONS = [
     {"id": "outlier",      "icon": "🚨", "name": "Outlier Detection", "desc": "IQR-based anomaly analysis"},
 ]
 
+# _RUNNERS maps analysis ID → the function that produces (title, fig) tuples.
+# Signature for every runner:  fn(df, **kwargs) -> list[tuple[str, Figure]]
+# Exceptions: descriptive and data_quality take only df (no kwargs).
 _RUNNERS = {
     "descriptive":  run_descriptive,
+    "data_quality": run_data_quality,
     "statistical":  run_statistical,
     "distribution": run_distribution,
     "correlation":  run_correlation,
@@ -114,8 +118,9 @@ _RUNNERS = {
 _NEEDS_AXES = {"statistical", "distribution", "correlation", "categorical",
                "pie_chart", "time_series", "outlier"}
 
-# Reserved for future analyses that must bypass the standard st.form() wrapper.
-_NO_FORM = set()
+# Analyses that must NOT be wrapped in an st.form() -- they contain their own
+# st.button() widgets (data_quality has inline "Drop NA" / "Drop Duplicates").
+_NO_FORM = {"data_quality"}
 
 # ── Aggregation function labels → pandas method strings ───────────────────────
 _AGG_FUNCS = {
