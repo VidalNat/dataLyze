@@ -1,24 +1,19 @@
 """
 modules/pages/auth.py -- Login, registration, and profile management page.
-==========================================================================
-
 Exposes two entry-point functions called by app.py:
-    page_auth()    -- sign-in / sign-up form for unauthenticated users
-    page_profile() -- account settings, password change, account deletion
-
+page_auth()    -- sign-in / sign-up form for unauthenticated users
+page_profile() -- account settings, password change, account deletion
 Authentication flow:
-    1. User submits credentials → login_user() validates them.
-    2. On success, create_token() issues a persistent token.
-    3. The token is written to ?t= in the URL via st.query_params.
-    4. Every subsequent page load validates the token via validate_token().
-    5. Sign-out calls revoke_token() and clears session_state.
-
+1. User submits credentials → login_user() validates them.
+2. On success, create_token() issues a 7-day persistent token.
+3. The token is written to an encrypted browser cookie (survives restarts).
+4. Every subsequent page load validates the token via validate_token().
+5. Sign-out calls revoke_token() and clears session_state + cookie.
 CONTRIBUTING -- to add a new profile setting:
-    Add a new st.expander() block in page_profile() below the existing sections.
-    Use the same confirm-before-action pattern as the account deletion block.
+Add a new st.expander() block in page_profile() below the existing sections.
+Use the same confirm-before-action pattern as the account deletion block.
 Logo is text-only on the auth page per spec (#10).
 """
-
 import os
 import streamlit as st
 from streamlit_cookies_manager import EncryptedCookieManager
@@ -35,11 +30,10 @@ cookies = EncryptedCookieManager(prefix="lytrize_", password=COOKIE_SECRET)
 if not cookies.ready():
     st.stop()  # ⚠️ Required: waits for browser JS to sync cookies before rendering UI
 
-
 def page_auth():
     # 🔍 Check cookie first (persistent), then URL param (shareable links)
     auth_token = cookies.get("auth_token", "") or st.query_params.get("t", "")
-
+    
     if auth_token and "user_id" not in st.session_state:
         restored = validate_token(auth_token)
         if restored:
@@ -61,7 +55,7 @@ def page_auth():
     tab = st.query_params.get("tab", "login")
     if "auth_tab" not in st.session_state:
         st.session_state.auth_tab = tab
-    is_login = st.session_state.auth_tab == "login"  # Switch between Login and Register tab without a full page reload.
+    is_login = st.session_state.auth_tab == "login"
 
     _, col, _ = st.columns([1, 0.85, 1])
     with col:
@@ -74,7 +68,7 @@ def page_auth():
         )
         st.markdown(
             '<div style="text-align:center;padding-top:3rem;margin-bottom:2rem;">'
-            f'<div style="display:inline-flex;align-items:center;justify-content:center;">{icon_html}'
+            f'<div style="display:inline-flex;align-items:center;justify:center;">{icon_html}'
             f'<span class="brand" style="font-size:2rem;">{BRAND_NAME}</span></div>'
             '<div style="font-size:0.88rem;margin-top:0.5rem;opacity:0.65;">'
             'Quick Analysis Platform</div>'
@@ -84,11 +78,11 @@ def page_auth():
         col_login, col_reg = st.columns(2)
         with col_login:
             if st.button("🔐 Login", use_container_width=True,
-                         type="primary" if is_login else "secondary"):
+                        type="primary" if is_login else "secondary"):
                 st.session_state.auth_tab = "login"; st.rerun()
         with col_reg:
             if st.button("✨ Register", use_container_width=True,
-                         type="primary" if not is_login else "secondary"):
+                        type="primary" if not is_login else "secondary"):
                 st.session_state.auth_tab = "register"; st.rerun()
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -97,7 +91,7 @@ def page_auth():
             username = st.text_input("Username", key="l_user")
             password = st.text_input("Password", type="password", key="l_pass")
             remember = st.checkbox("Stay signed in", value=True, key="remember_me")
-            if st.button("Sign In →", use_container_width=True):  # Validate credentials and create a persistent token on success.
+            if st.button("Sign In →", use_container_width=True):
                 user = login_user(username, password)
                 if user:
                     st.session_state.user_id  = user[0]
@@ -137,12 +131,11 @@ def page_auth():
 
     inject_footer()
 
-
-def page_profile():  # Account settings page — shown when user clicks Profile button.
+def page_profile():
     """User profile page -- account info and danger-zone actions."""
     from modules.ui.css import render_logo
     render_logo()
-
+    
     if st.button("← Back to Home"):
         st.session_state.page = "home"
         st.rerun()
@@ -177,14 +170,14 @@ def page_profile():  # Account settings page — shown when user clicks Profile 
             st.rerun()
     else:
         st.warning(
-            "Are you sure? This will permanently delete your account and **all saved sessions**. "
+            "Are you sure? This will permanently delete your account and **all saved sessions**.  "
             "This cannot be undone."
         )
         col_yes, col_no, _ = st.columns([1, 1, 4])
         with col_yes:
             if st.button("✅ Yes, delete everything", type="primary",
-                         use_container_width=True):
-                ok = delete_user_db(user_id)  # delete_user_db removes all data
+                        use_container_width=True):
+                ok = delete_user_db(user_id)
                 if ok:
                     # Wipe session state fully
                     for k in list(st.session_state.keys()):
