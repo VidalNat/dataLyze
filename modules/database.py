@@ -105,6 +105,8 @@ def _last_id(cursor) -> int:  # Get the last inserted row ID in a backend-agnost
     if _PG:
         cursor.execute("SELECT lastval()")
         return cursor.fetchone()[0]
+    else:
+        return cursor.lastrowid
 
 
 def _execute(conn, query: str, params=()):
@@ -130,7 +132,6 @@ def _execute_fetchall(conn, query: str, params=()):
     rows = cur.fetchall()
     cur.close()
     return rows
-    return cursor.lastrowid
 
 
 # ─────────────────────────────────────────────────────────────────────────────

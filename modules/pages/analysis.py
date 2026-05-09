@@ -501,11 +501,20 @@ def _render_chart_list(charts, edit_mode=False):
         if yl: fig_show.update_yaxes(title_text=yl)
         fig_show.update_layout(title_text="")
         # Apply stored legend trace renames (from Chart Settings → Legend Labels)
-        stored_names = meta.get("trace_names", {})
+        # New format: legend_names = {original_name: custom_name}
+        # Legacy fallback: trace_names = {str(index): custom_name}
+        stored_legend = meta.get("legend_names", {})
+        stored_trace_idx = meta.get("trace_names", {})
         for _ti, _trace in enumerate(fig_show.data):
-            renamed = stored_names.get(str(_ti))
+            _orig = getattr(_trace, "name", None)
+            if _orig is None:
+                continue
+            renamed = stored_legend.get(str(_orig)) or stored_trace_idx.get(str(_ti))
             if renamed:
                 _trace.name = renamed
+        _leg_title = meta.get("legend_title", "")
+        if _leg_title:
+            fig_show.update_layout(legend_title_text=_leg_title)
         is_horiz = any(getattr(t, "orientation", "v") == "h"
                        for t in fig_show.data if hasattr(t, "orientation"))
         if is_horiz:
@@ -544,31 +553,54 @@ def _render_chart_list(charts, edit_mode=False):
                                        key=f"ayl_{uid}")
 
             # ── Legend / Trace Labels ─────────────────────────────────────
-            # Only shown for charts that have at least one named trace
-            # (dual-Y charts, multi-line time series, etc.).
-            _named_traces = [
-                (i, t) for i, t in enumerate(fig.data)
-                if getattr(t, "name", None)
-            ]
-            new_trace_names = {}
-            if _named_traces:
+            # Deduplicate by name so charts with multiple traces per category
+            # (e.g. histogram + box per store) only show one input per label.
+            _seen_legend: set = set()
+            _unique_legend: list = []  # [(original_name, display_label), ...]
+            for _t in fig.data:
+                _raw = getattr(_t, "name", None)
+                if _raw is not None and str(_raw) not in _seen_legend:
+                    _seen_legend.add(str(_raw))
+                    _unique_legend.append(str(_raw))
+
+            new_legend_names: dict = {}
+            new_legend_title: str = ""
+            if len(_unique_legend) > 1:
                 st.markdown("**🏷️ Legend Labels**")
+                # ── Legend group title ────────────────────────────────────
+                _auto_leg_title = ""
+                try:
+                    _auto_leg_title = fig.layout.legend.title.text or ""
+                except Exception:
+                    pass
+                new_legend_title = st.text_input(
+                    "Legend Title",
+                    value=meta.get("legend_title", ""),
+                    placeholder=_auto_leg_title or "e.g. Store",
+                    key=f"alt_{uid}",
+                    help=f"The heading above the legend. Auto-generated: '{_auto_leg_title}'. Leave blank to keep it."
+                )
                 st.caption(
                     "Rename the legend entries shown on the chart. "
                     "Leave blank to keep the auto-generated name.")
-                _stored_names = meta.get("trace_names", {})
-                _tn_cols = st.columns(min(len(_named_traces), 3))
-                for _col_i, (_ti, _trace) in enumerate(_named_traces):
+                # Prefer the new legend_names dict; fall back to old trace_names
+                # index format so previously saved renames still display.
+                _saved_legend = meta.get("legend_names", {})
+                if not _saved_legend:
+                    _old_idx = meta.get("trace_names", {})
+                    for _ti2, _t2 in enumerate(fig.data):
+                        _n2 = getattr(_t2, "name", None)
+                        if _n2 and str(_ti2) in _old_idx:
+                            _saved_legend.setdefault(str(_n2), _old_idx[str(_ti2)])
+                _tn_cols = st.columns(min(len(_unique_legend), 3))
+                for _col_i, _orig in enumerate(_unique_legend):
                     with _tn_cols[_col_i % len(_tn_cols)]:
-                        _auto_name = _trace.name or f"Trace {_ti + 1}"
-                        _cur_name  = _stored_names.get(str(_ti), "")
-                        new_trace_names[str(_ti)] = st.text_input(
-                            f"Label for: {_auto_name}",
-                            value=_cur_name,
-                            placeholder=_auto_name,
-                            key=f"atn_{uid}_{_ti}",
-                            help=f"Auto name: '{_auto_name}'. "
-                                 "Leave blank to keep it.")
+                        new_legend_names[_orig] = st.text_input(
+                            f"Label for: {_orig}",
+                            value=_saved_legend.get(_orig, ""),
+                            placeholder=_orig,
+                            key=f"aln_{uid}_{_col_i}",
+                            help=f"Original: '{_orig}'. Leave blank to keep it.")
 
             # Auto-insights toggle
             chart_type    = st.session_state.get(f"chart_type_{uid}", "")
@@ -593,8 +625,8 @@ def _render_chart_list(charts, edit_mode=False):
                         new_hidden.add(i)
 
             if st.button("💾 Save Settings", key=f"asave_{uid}", type="primary"):
-                # Only persist trace renames that the user actually filled in
-                saved_trace_names = {k: v for k, v in new_trace_names.items() if v.strip()}
+                # Only persist legend renames that the user actually filled in
+                saved_legend_names = {k: v for k, v in new_legend_names.items() if v.strip()}
                 _set_chart_meta(uid,
                                 custom_title=new_title,
                                 subtitle=new_sub,
@@ -602,7 +634,8 @@ def _render_chart_list(charts, edit_mode=False):
                                 y_label=new_yl,
                                 show_auto_insights=show_ai,
                                 hidden_insights=list(new_hidden),
-                                trace_names=saved_trace_names)
+                                legend_title=new_legend_title,
+                                legend_names=saved_legend_names)
                 # Keep title in charts list in sync
                 st.session_state.charts = [
                     (c[0], new_title if c[0] == uid else c[1], c[2])

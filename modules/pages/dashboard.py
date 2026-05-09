@@ -118,24 +118,28 @@ def _apply_axes(fig, x_lbl, y_lbl):  # Apply custom X/Y axis labels to a deep co
         return fig
 
 
-def _apply_legend_names(fig, legend_names: dict):  # Rename Plotly traces using the legend_names dict in chart_meta.
+def _apply_legend_names(fig, legend_names: dict, legend_title: str = ""):  # Rename traces and the legend group title.
     """
     Rename Plotly traces using the {original_name: custom_name} mapping stored
-    in chart_meta. Only renames traces that have a non-empty custom name set.
+    in chart_meta, and optionally override the legend group title.
 
     Works on any figure type (histogram, bar, scatter, line, etc.).
     Traces whose names are not in the mapping are left unchanged.
+    Pass legend_title="" (or omit) to leave the auto-generated title as-is.
     """
-    if not legend_names:
-        return fig
     try:
         f2 = copy.deepcopy(fig)
-        for trace in f2.data:
-            original = getattr(trace, "name", None)
-            if original is not None and str(original) in legend_names:
-                custom = legend_names[str(original)]
-                if custom:
-                    trace.name = custom
+        if legend_names:
+            for trace in f2.data:
+                original = getattr(trace, "name", None)
+                if original is not None and str(original) in legend_names:
+                    custom = legend_names[str(original)]
+                    if custom:
+                        trace.name = custom
+        if legend_title:
+            f2.update_layout(legend_title_text=legend_title)
+        elif legend_title == "":
+            pass  # keep whatever Plotly set automatically
         return f2
     except Exception:
         return fig
@@ -595,6 +599,7 @@ def _chart_settings(uid, title, fig, auto_insights, readonly):
         # Collects the unique trace names from fig.data (e.g. category values
         # from a "Colour by" split) and lets the user override each one.
         legend_inputs = {}
+        new_legend_title = ""
         try:
             trace_names = []
             seen_names = set()
@@ -608,14 +613,27 @@ def _chart_settings(uid, title, fig, auto_insights, readonly):
             if len(trace_names) > 1:
                 st.markdown("---")
                 st.markdown("🏷️ **Legend Labels**")
+                # ── Legend group title ────────────────────────────────────────
+                _auto_leg_title = ""
+                try:
+                    _auto_leg_title = fig.layout.legend.title.text or ""
+                except Exception:
+                    pass
+                new_legend_title = st.text_input(
+                    "Legend Title",
+                    value=_meta(uid).get("legend_title", ""),
+                    placeholder=_auto_leg_title or "e.g. Store",
+                    key=f"legt_{uid}",
+                    help=f"The heading above the legend. Auto-generated: '{_auto_leg_title}'. Leave blank to keep it."
+                )
                 st.caption("Rename each legend entry. Leave blank to keep the original value.")
                 saved_legend = _meta(uid).get("legend_names", {})
-                for tname in trace_names:
+                for _leg_i, tname in enumerate(trace_names):
                     legend_inputs[tname] = st.text_input(
                         f"`{tname}`",
                         value=saved_legend.get(tname, ""),
                         placeholder=tname,
-                        key=f"leg_{uid}_{tname}",
+                        key=f"leg_{uid}_{_leg_i}",
                     )
         except Exception:
             pass
@@ -625,6 +643,7 @@ def _chart_settings(uid, title, fig, auto_insights, readonly):
                       x_label=xl, y_label=yl,
                       show_auto_insights=show_ai,
                       hidden_insights=list(hidden),
+                      legend_title=new_legend_title,
                       legend_names=legend_inputs)
             # Also update the stored chart title tuple so the list header matches
             charts = st.session_state.get("charts", [])
@@ -659,7 +678,7 @@ def _render_chart(item, idx, total, viewing_saved):
     yl      = meta.get("y_label","")
 
     fig_show = _apply_axes(fig, xl, yl)
-    fig_show = _apply_legend_names(fig_show, meta.get("legend_names", {}))
+    fig_show = _apply_legend_names(fig_show, meta.get("legend_names", {}), meta.get("legend_title", ""))
     # Prepare display figure -- apply axis labels, legend names, and styling but do NOT embed
     # the title inside the Plotly figure (it is rendered as a heading above the
     # chart instead, so it only appears once).
@@ -1027,7 +1046,7 @@ def _export_row(charts, sname, viewing_saved):
         if full_width.get(uid):
             meta["full_width"] = True
         fig  = _apply_axes(item[2], meta.get("x_label",""), meta.get("y_label",""))
-        fig  = _apply_legend_names(fig, meta.get("legend_names", {}))
+        fig  = _apply_legend_names(fig, meta.get("legend_names", {}), meta.get("legend_title", ""))
         # Read notes from session_state live so they're always current
         notes = st.session_state.get(f"desc_{uid}", "") or (item[3] if len(item) > 3 else "")
         export_charts.append((uid, item[1], fig, notes, item[4] if len(item)>4 else [],

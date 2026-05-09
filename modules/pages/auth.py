@@ -14,15 +14,6 @@ Add a new st.expander() block in page_profile() below the existing sections.
 Use the same confirm-before-action pattern as the account deletion block.
 Logo is text-only on the auth page per spec (#10).
 """
-"""
-modules/pages/auth.py -- Login, registration, and profile management page.
-"""
-"""
-modules/pages/auth.py -- Login, registration, and profile management page.
-"""
-"""
-modules/pages/auth.py -- Login, registration, and profile management page.
-"""
 
 import os
 import streamlit as st
@@ -111,7 +102,8 @@ def page_auth():
                     
                     # ✅ Create token and save to cookie
                     tok = create_token(user[0], user[1])
-                    cookies["auth_token"] = tok
+                    if remember:
+                        cookies["auth_token"] = tok
                     st.query_params.clear()
                     
                     st.rerun()
