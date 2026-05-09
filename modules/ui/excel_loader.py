@@ -52,32 +52,21 @@ import pandas as pd
 import numpy as np
 from html import escape
 from itertools import combinations
-from modules.utils.perf import get_sheet_names, read_excel_sheet
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _load_all_sheets(file) -> dict[str, pd.DataFrame]:
+    """Read every sheet from the uploaded Excel file into a dict."""
+    file.seek(0)
+    return pd.read_excel(file, sheet_name=None)   # sheet_name=None → all sheets
+
 
 def _file_key(uploaded_file) -> str:
     file_id = getattr(uploaded_file, "file_id", None)
     size = getattr(uploaded_file, "size", None)
     token = file_id or f"{size}_{len(uploaded_file.getbuffer())}"
     return f"_xl_sheets_{uploaded_file.name}_{token}"
-
-
-def _lazy_get_sheet(uploaded_file, file_key: str, sheet_name: str) -> pd.DataFrame:
-    """
-    Load a single sheet on demand and cache it in session_state.
-
-    Replaces the old _load_all_sheets() which eagerly loaded the entire
-    workbook -- catastrophic for 300-400 MB multi-sheet Excel files.
-    Each sheet is dtype-optimised on first load; subsequent calls return
-    the cached copy instantly.
-    """
-    cache_key = f"{file_key}__{sheet_name}"
-    if cache_key not in st.session_state:
-        with st.spinner(f"Loading sheet **{sheet_name}**…"):
-            st.session_state[cache_key] = read_excel_sheet(uploaded_file, sheet_name)
-    return st.session_state[cache_key]
 
 
 def _common_columns(df_a: pd.DataFrame, df_b: pd.DataFrame) -> list[str]:
@@ -110,40 +99,32 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
     """
     file_key = _file_key(uploaded_file)
 
-    # ── Lazily read sheet names (cheap: reads workbook XML, not cell data) ─────
-    names_key = f"{file_key}__names"
-    if names_key not in st.session_state:
-        with st.spinner("Scanning workbook…"):
-            st.session_state[names_key] = get_sheet_names(uploaded_file)
-    sheet_names: list[str] = st.session_state[names_key]
+    # Cache sheets in session state so we don't re-read on every widget interaction
+    if file_key not in st.session_state:
+        with st.spinner("Reading all sheets…"):
+            st.session_state[file_key] = _load_all_sheets(uploaded_file)
+
+    sheets: dict[str, pd.DataFrame] = st.session_state[file_key]
+    sheet_names = list(sheets.keys())
 
     if len(sheet_names) == 1:
-        # Only one sheet -- load it immediately
+        # Only one sheet -- just load it, nothing to choose
         st.info(f"📋 Single sheet detected: **{sheet_names[0]}**")
-        return _lazy_get_sheet(uploaded_file, file_key, sheet_names[0])
+        return sheets[sheet_names[0]]
 
-    # ── Sheet overview cards (each sheet loaded on demand) ────────────────────
+    # ── Sheet overview cards ──────────────────────────────────────────────────
     st.markdown("### 📑 Sheets in this workbook")
-    st.caption("Sheets are loaded individually — only the one you select will be read into memory.")
     cols = st.columns(min(len(sheet_names), 4))
     for i, name in enumerate(sheet_names):
+        df_s = sheets[name]
         safe_name = escape(str(name))
         with cols[i % 4]:
-            # Show card with just the name; shape shown after the sheet is loaded.
-            cache_key = f"{file_key}__{name}"
-            if cache_key in st.session_state:
-                df_s = st.session_state[cache_key]
-                shape_txt = _shape_tag(df_s)
-                dtype_txt = _dtype_summary(df_s)
-            else:
-                shape_txt = "click to load"
-                dtype_txt = ""
             st.markdown(
                 f"""<div style="background:rgba(79,110,247,0.08);border:1px solid rgba(79,110,247,0.2);
                 border-radius:12px;padding:0.9rem 1rem;margin-bottom:0.5rem;">
                 <div style="font-weight:700;font-size:0.9rem;margin-bottom:4px;">📄 {safe_name}</div>
-                <div style="font-size:0.75rem;opacity:0.75;">{shape_txt}</div>
-                <div style="font-size:0.72rem;opacity:0.6;">{dtype_txt}</div>
+                <div style="font-size:0.75rem;opacity:0.75;">{_shape_tag(df_s)}</div>
+                <div style="font-size:0.72rem;opacity:0.6;">{_dtype_summary(df_s)}</div>
                 </div>""",
                 unsafe_allow_html=True
             )
@@ -171,7 +152,7 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
             sheet_names,
             key="_xl_single_sheet",
         )
-        df_preview = _lazy_get_sheet(uploaded_file, file_key, selected)
+        df_preview = sheets[selected]
 
         with st.expander(f"👁️ Preview -- {selected}  ({_shape_tag(df_preview)})", expanded=True):
             st.dataframe(df_preview.head(10), use_container_width=True)
@@ -197,7 +178,7 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
     st.markdown("#### Step 1 -- Choose your Fact table")
     st.caption("TThe Base table is your main dataset with unique metrics like (transactions, records, events etc). Other sheets will be merged into this table. It's usually the largest or most central sheet.")
     fact_name = st.selectbox("Fact table sheet:", sheet_names, key="_xl_fact")
-    fact_df   = _lazy_get_sheet(uploaded_file, file_key, fact_name)
+    fact_df   = sheets[fact_name]
 
     with st.expander(f"👁️ Base table preview -- {fact_name}  ({_shape_tag(fact_df)})", expanded=False):
         st.dataframe(fact_df.head(8), use_container_width=True)
@@ -227,7 +208,7 @@ def show_excel_loader(uploaded_file) -> pd.DataFrame | None:
     all_valid = True
 
     for dim_name in selected_dims:
-        dim_df = _lazy_get_sheet(uploaded_file, file_key, dim_name)
+        dim_df = sheets[dim_name]
         common = _common_columns(fact_df, dim_df)
 
         st.markdown(f"**🔗 {fact_name}  ←→  {dim_name}**")

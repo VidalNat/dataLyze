@@ -41,7 +41,7 @@ import json, copy, datetime
 import pandas as pd
 import streamlit as st
 from html import escape
-import re 
+import re
 
 from modules.database import (
     validate_token, log_activity,
@@ -51,7 +51,7 @@ from modules.database import (
 )
 from modules.charts import charts_to_json, clean_insight_text, _fmt_num
 from modules.export import generate_html_report
-from modules.ui.css import inject_footer, render_logo, render_page_steps
+from modules.ui.css import inject_footer, render_logo
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -382,7 +382,7 @@ def _render_kpi_section(df, readonly):
                         )
                     except Exception:
                         pass
-                st.toast(f"KPI added: {kpi['label']} = {kpi['value']}{kpi['suffix']}", icon="📌")
+                st.success(f"✅ {kpi['label']}: {kpi['value']}{kpi['suffix']}")
                 st.rerun()
     elif not readonly:
         st.caption("Upload a dataset and go to Analysis first to enable KPI calculation.")
@@ -513,7 +513,7 @@ def _render_layout_builder(charts):
         st.session_state.grid_cols_n    = grid_cols_n
         _dash_sync_notes()
         _persist()
-        st.toast("Layout applied.", icon="🗂️")
+        st.success("✅ Layout applied!")
         st.rerun()
 
     return assigned_uids
@@ -581,7 +581,7 @@ def _chart_settings(uid, title, fig, auto_insights, readonly):
             ]
             _dash_sync_notes()
             _persist()
-            st.toast("Chart settings saved.", icon="💾")
+            st.success("Saved!")
             st.rerun()
 
 
@@ -851,21 +851,16 @@ def page_dashboard():
 
     charts = _all_charts(viewing_saved)
 
-    nc1, nc2 = st.columns([10, 1.5])
-    with nc1:
-        render_logo()
-    with nc2:
-        back_label = "← Home" if viewing_saved else "← Analyse"
-        if st.button(back_label, use_container_width=True, key="dash_back_btn"):
-            if viewing_saved:
-                for k in ["view_session_id","_view_charts","_vsid",
-                          "dashboard_title","kpis","layout_mode"]:
-                    st.session_state.pop(k, None)
-                st.session_state.page = "home"
-            else:
-                st.session_state.page = "analysis"
-            st.rerun()
-    render_page_steps("dashboard")
+    render_logo()
+    if st.button("← Back"):
+        if viewing_saved:
+            for k in ["view_session_id","_view_charts","_vsid",
+                      "dashboard_title","kpis","layout_mode"]:
+                st.session_state.pop(k, None)
+            st.session_state.page = "home"
+        else:
+            st.session_state.page = "analysis"
+        st.rerun()
 
     # ── Dashboard title ───────────────────────────────────────────────────────
     if not viewing_saved:
@@ -1011,7 +1006,7 @@ def _do_save(sname_in, charts, df):
     st.session_state.pop("_edit_notes_loaded",    None)
     st.session_state.pop("_analysis_notes_loaded", None)
     st.session_state.pop("_notes_shadow",          None)
-    st.toast(f"Saved as '{sname_in}'!", icon="💾")
+    st.success(f"✅ Saved as '{sname_in}'!")
 
 
 def _do_update(sname_in, charts, clear_editing=True):
@@ -1031,7 +1026,7 @@ def _do_update(sname_in, charts, clear_editing=True):
         kpis_json       = json.dumps(st.session_state.get("kpis",[])),
         layout_mode     = st.session_state.get("layout_mode","portrait"))
     clear_draft(st.session_state.user_id)
-    st.toast(f"Updated '{sname_in}'!", icon="✅")
+    st.success(f"✅ Updated '{sname_in}'!")
     if clear_editing:
         st.session_state.pop("editing_session_id",   None)
         st.session_state.pop("editing_session_name", None)

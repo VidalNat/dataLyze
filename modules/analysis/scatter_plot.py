@@ -5,24 +5,23 @@ modules/analysis/scatter_plot.py -- Scatter plot runner.
 Visualises the relationship between two numeric variables with optional
 colour grouping, size encoding, and trendlines.
 
-Refinements over v1:
   - Adaptive marker opacity by point density (fewer points → more opaque)
   - Pearson r annotation on the chart when no colour grouping is active
-  - Marginal rug plots on X and Y axes for distribution context (≤5 K pts)
-  - Normalised size encoding: maps size column to a sensible pixel range
-  - WebGL render mode for snappy interaction on large samples
-  - Sample warning rendered inside the plot area, not below it
+  - Rich per-point hover: shows column names + values clearly
+  - Normalised size encoding: maps size column to [4, 28] pixel range
+  - Trendline options: OLS (linear) or LOWESS (smoothed) — case-insensitive
+  - WebGL mode intentionally disabled: px.scatter WebGL breaks hover tooltips
+    and per-point size encoding; SVG renders correctly at the 8 K sample limit.
 """
 import numpy as np
+import pandas as pd
 import plotly.express as px
 from modules.charts import chart_layout, COLORS, num_cols as _num_cols
 from modules.utils.perf import sample_for_plot
 
 
 def _pearson_r(a, b):
-    """Return Pearson r between two series, or None on failure."""
     try:
-        import pandas as pd
         s1 = pd.to_numeric(a, errors="coerce").dropna()
         s2 = pd.to_numeric(b, errors="coerce").dropna()
         idx = s1.index.intersection(s2.index)
@@ -34,10 +33,18 @@ def _pearson_r(a, b):
 
 
 def _opacity(n: int) -> float:
-    if n < 500:    return 0.85
-    if n < 2_000:  return 0.65
-    if n < 10_000: return 0.45
-    return 0.30
+    if n < 300:    return 0.90
+    if n < 1_500:  return 0.75
+    if n < 8_000:  return 0.55
+    return 0.40
+
+
+def _normalise_size(series: pd.Series, lo: float = 4, hi: float = 28) -> pd.Series:
+    """Map size column to [lo, hi] pixel range."""
+    mn, mx = series.min(), series.max()
+    if mx == mn:
+        return pd.Series([float(lo + (hi - lo) / 2)] * len(series), index=series.index)
+    return lo + (series - mn) / (mx - mn) * (hi - lo)
 
 
 def run_scatter_plot(df, x_col=None, y_col=None, color_col=None, size_col=None,
@@ -52,66 +59,92 @@ def run_scatter_plot(df, x_col=None, y_col=None, color_col=None, size_col=None,
         return []
 
     color = color_col if color_col and color_col in df.columns else None
-    tl    = trendline  if trendline  and trendline  != "None" else None
+    tl    = trendline.lower() if trendline and trendline.lower() != "none" else None
 
-    # Size column: only use it when it has variance
-    size = None
-    if size_col and size_col in df.columns:
-        try:
-            if df[size_col].dropna().nunique() > 1:
-                size = size_col
-        except Exception:
-            pass
-
-    # ── Performance sample ────────────────────────────────────────────────────
-    plot_df, sampled = sample_for_plot(df, n=50_000)
+    # ── Performance sample (SVG handles 8 K well; no WebGL needed) ───────────
+    plot_df, sampled = sample_for_plot(df, n=8_000)
     n_pts   = len(plot_df)
     opacity = _opacity(n_pts)
 
-    # ── Pearson r (skip when colour-grouped — r would be misleading) ──────────
+    # ── Size normalisation ────────────────────────────────────────────────────
+    size_arr = None
+    if size_col and size_col in df.columns:
+        try:
+            raw = pd.to_numeric(df[size_col], errors="coerce").reindex(plot_df.index)
+            if raw.dropna().nunique() > 1:
+                size_arr = _normalise_size(raw.fillna(raw.median()))
+        except Exception:
+            pass
+
+    # ── Pearson r ─────────────────────────────────────────────────────────────
     r_val = _pearson_r(plot_df[x], plot_df[y]) if not color else None
 
     # ── Title ─────────────────────────────────────────────────────────────────
-    r_str      = f"  |  r = {r_val:+.3f}" if r_val is not None else ""
-    sample_str = f"  (50 K sample of {len(df):,})" if sampled else ""
+    r_str      = f"  ·  r = {r_val:+.3f}" if r_val is not None else ""
+    sample_str = f"  ({n_pts:,} of {len(df):,} rows)" if sampled else ""
     title      = f"Scatter: {x} vs {y}{r_str}{sample_str}"
 
-    # Marginal rugs only for smaller plots — rug traces are expensive at scale
-    marginal = "rug" if n_pts <= 5_000 else None
+    # ── Hover: build customdata for extra columns ─────────────────────────────
+    extra_cols = [c for c in [color, size_col] if c and c in plot_df.columns and c not in (x, y)]
+    ht_lines   = [f"<b>{x}:</b> %{{x:,}}", f"<b>{y}:</b> %{{y:,}}"]
+    for i, col in enumerate(extra_cols):
+        ht_lines.append(f"<b>{col}:</b> %{{customdata[{i}]:,}}")
+    hover_template = "<br>".join(ht_lines) + "<extra></extra>"
 
+    # ── Figure ────────────────────────────────────────────────────────────────
     fig = px.scatter(
         plot_df, x=x, y=y,
         color=color,
-        size=size,
-        size_max=36,
-        trendline=tl,
-        marginal_x=marginal,
-        marginal_y=marginal,
         title=title,
         color_discrete_sequence=pal,
         opacity=opacity,
-        render_mode="webgl",
+        trendline=tl,
+        custom_data=extra_cols if extra_cols else None,
+        # render_mode="webgl" intentionally omitted — breaks hover & size encoding
+        # marginal_x / marginal_y intentionally omitted — shrink main plot area
     )
 
-    # Crisp marker borders help distinguish overlapping points
+    # Apply normalised sizes per-trace after figure creation
+    if size_arr is not None:
+        for trace in fig.data:
+            if hasattr(trace, "marker") and getattr(trace, "mode", "") != "lines":
+                try:
+                    trace.marker.size = size_arr.values
+                except Exception:
+                    pass
+
+    # Hover & marker style for scatter traces
     fig.update_traces(
         selector=dict(mode="markers"),
-        marker=dict(line=dict(width=0.5, color="rgba(255,255,255,0.25)")),
+        hovertemplate=hover_template,
+        marker=dict(line=dict(width=0.4, color="rgba(255,255,255,0.20)")),
     )
     if tl:
         fig.update_traces(
             selector=dict(mode="lines"),
             line=dict(width=2, dash="dot"),
+            hovertemplate=f"<b>{y} (trend):</b> %{{y:,.3f}}<extra></extra>",
         )
 
+    # ── Layout ────────────────────────────────────────────────────────────────
+    axis_style = dict(
+        tickfont=dict(color="#94a3b8", size=11),
+        title=dict(font=dict(color="#cbd5e1", size=12)),
+        gridcolor="rgba(100,116,139,0.18)",
+        linecolor="rgba(100,116,139,0.3)",
+        zerolinecolor="rgba(100,116,139,0.25)",
+        automargin=True,
+    )
     fig.update_layout(
         **chart_layout(),
         xaxis_title=x,
         yaxis_title=y,
+        xaxis=axis_style,
+        yaxis=axis_style,
         legend=dict(orientation="v", x=1.01, y=1),
     )
 
-    # ── Inline r annotation ───────────────────────────────────────────────────
+    # Pearson r badge
     if r_val is not None:
         strength  = "strong" if abs(r_val) >= 0.7 else "moderate" if abs(r_val) >= 0.4 else "weak"
         direction = "positive" if r_val > 0 else "negative"
@@ -121,14 +154,6 @@ def run_scatter_plot(df, x_col=None, y_col=None, color_col=None, size_col=None,
             showarrow=False, xanchor="left", yanchor="top",
             font=dict(size=11, color="#94a3b8"),
             bgcolor="rgba(15,23,42,0.55)", borderpad=4,
-        )
-
-    if sampled:
-        fig.add_annotation(
-            text=f"⚠ 50 K-row sample of {len(df):,} total rows",
-            xref="paper", yref="paper", x=0.5, y=-0.13,
-            showarrow=False, xanchor="center",
-            font=dict(size=10, color="#f59e0b"),
         )
 
     charts.append((f"Scatter: {x} vs {y}", fig))

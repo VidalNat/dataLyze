@@ -2,4 +2,5 @@ streamlit
 pandas
 plotly
 openpyxl
-psycopg2-binary
+# PostgreSQL support (optional — only needed when DATABASE_URL is set):
+# psycopg2-binary

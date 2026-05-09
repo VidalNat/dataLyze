@@ -44,94 +44,67 @@ def page_auth():
         st.session_state.auth_tab = tab
     is_login = st.session_state.auth_tab == "login"
 
-    # Style the middle column to look like a glass card
-    st.markdown("""
-    <style>
-    div[data-testid="column"]:nth-child(2) > div > div > div {
-        background: var(--surface-raised) !important;
-        backdrop-filter: blur(24px) saturate(200%) !important;
-        -webkit-backdrop-filter: blur(24px) saturate(200%) !important;
-        border: 1px solid var(--border-soft) !important;
-        border-radius: var(--radius-xl) !important;
-        box-shadow: var(--shadow-lg) !important;
-        padding: 2rem 1.6rem 2.2rem !important;
-        animation: fadeUp .4s cubic-bezier(0.4,0,0.2,1) both;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-    _, col, _ = st.columns([1, 0.9, 1])
+    _, col, _ = st.columns([1, 0.85, 1])
     with col:
-        logo_src  = logo_data_uri()
+        logo_src = logo_data_uri()
         icon_html = (
             f'<img src="{logo_src}" alt="{BRAND_NAME} logo" '
-            'style="width:2.6rem;height:2.6rem;object-fit:contain;">'
-            if logo_src else '<span style="font-size:2.4rem;">&#128202;</span>'
+            'style="width:2.2rem;height:2.2rem;object-fit:contain;vertical-align:middle;margin-right:8px;">'
+            if logo_src else
+            '<span style="font-size:2rem;line-height:1;vertical-align:middle;margin-right:8px;">&#128202;</span>'
         )
         st.markdown(
-            '<div style="text-align:center;padding:.5rem 0 1.4rem;">'
-            f'<div style="margin-bottom:.6rem;">{icon_html}</div>'
-            f'<div class="brand" style="font-size:2rem;">{BRAND_NAME}</div>'
-            '<div style="font-size:.82rem;margin-top:.35rem;opacity:.5;font-weight:500;">'
-            'Your quick data analysis platform</div>'
+            '<div style="text-align:center;padding-top:3rem;margin-bottom:2rem;">'
+            f'<div style="display:inline-flex;align-items:center;justify-content:center;">{icon_html}'
+            f'<span class="brand" style="font-size:2rem;">{BRAND_NAME}</span></div>'
+            '<div style="font-size:0.88rem;margin-top:0.5rem;opacity:0.65;">'
+            'Quick Analysis Platform</div>'
             '</div>',
             unsafe_allow_html=True)
 
-        t1, t2 = st.columns(2)
-        with t1:
-            if st.button("🔐  Sign In", use_container_width=True,
+        col_login, col_reg = st.columns(2)
+        with col_login:
+            if st.button("🔐 Login", use_container_width=True,
                          type="primary" if is_login else "secondary"):
                 st.session_state.auth_tab = "login"; st.rerun()
-        with t2:
-            if st.button("✨  Register", use_container_width=True,
+        with col_reg:
+            if st.button("✨ Register", use_container_width=True,
                          type="primary" if not is_login else "secondary"):
                 st.session_state.auth_tab = "register"; st.rerun()
 
-        st.markdown("<div style='height:.7rem'></div>", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
 
         if is_login:
-            username = st.text_input("Username", key="l_user", placeholder="Enter your username")
-            password = st.text_input("Password", type="password", key="l_pass",
-                                     placeholder="Enter your password")
-            remember = st.checkbox("Stay signed in for 7 days", value=True, key="remember_me")
-            st.markdown("<div style='height:.3rem'></div>", unsafe_allow_html=True)
-            if st.button("Sign In →", use_container_width=True, type="primary"):
-                if not username or not password:
-                    st.error("Please fill in both fields.")
-                else:
-                    user = login_user(username, password)
-                    if user:
-                        st.session_state.user_id  = user[0]
-                        st.session_state.username = user[1]
-                        st.session_state.page     = "home"
-                        log_activity(user[0], "login", f"user={username}")
-                        if remember:
-                            tok = create_token(user[0], user[1])
-                            st.query_params["t"] = tok
-                        else:
-                            st.query_params.clear()
-                        st.rerun()
+            username = st.text_input("Username", key="l_user")
+            password = st.text_input("Password", type="password", key="l_pass")
+            remember = st.checkbox("Stay signed in", value=True, key="remember_me")
+            if st.button("Sign In →", use_container_width=True):
+                user = login_user(username, password)
+                if user:
+                    st.session_state.user_id  = user[0]
+                    st.session_state.username = user[1]
+                    st.session_state.page     = "home"
+                    log_activity(user[0], "login", f"user={username}")
+                    if remember:
+                        tok = create_token(user[0], user[1])
+                        st.query_params["t"] = tok
                     else:
-                        st.error("Incorrect username or password.")
+                        st.query_params.clear()
+                    st.rerun()
+                else:
+                    st.error("Incorrect username or password.")
         else:
-            ru  = st.text_input("Username",         key="r_u",  placeholder="Choose a username")
-            re  = st.text_input("Email",            key="r_e",  placeholder="your@email.com")
-            rp  = st.text_input("Password",         type="password", key="r_p",
-                                 placeholder="Minimum 6 characters")
-            rp2 = st.text_input("Confirm Password", type="password", key="r_p2",
-                                 placeholder="Repeat your password")
-            st.markdown("<div style='height:.3rem'></div>", unsafe_allow_html=True)
-            if st.button("Create Account →", use_container_width=True, type="primary"):
-                if not all([ru, re, rp, rp2]):
-                    st.error("All fields are required.")
-                elif rp != rp2:
-                    st.error("Passwords don't match.")
-                elif len(rp) < 6:
-                    st.error("Password must be at least 6 characters.")
+            ru  = st.text_input("Username",         key="r_u")
+            re  = st.text_input("Email",            key="r_e")
+            rp  = st.text_input("Password",         type="password", key="r_p")
+            rp2 = st.text_input("Confirm Password", type="password", key="r_p2")
+            if st.button("Create Account →", use_container_width=True):
+                if rp != rp2:       st.error("Passwords don't match.")
+                elif len(rp) < 6:   st.error("Password must be 6+ characters.")
                 else:
                     ok, msg = register_user(ru, re, rp)
                     if ok:
-                        st.toast("Account created! Please sign in.", icon="✅")
+                        st.success(msg)
                         log_activity(0, "register", f"new user={ru}")
                         st.session_state.auth_tab = "login"
                         st.rerun()
@@ -189,11 +162,12 @@ def page_profile():
                          use_container_width=True):
                 ok = delete_user_db(user_id)
                 if ok:
+                    # Wipe session state fully and redirect to auth
                     for k in list(st.session_state.keys()):
                         del st.session_state[k]
                     st.query_params.clear()
                     st.session_state.page = "auth"
-                    st.toast("Your account has been deleted.", icon="🗑️")
+                    st.success("Your account has been deleted.")
                     st.rerun()
                 else:
                     st.error("Something went wrong -- account could not be deleted. Try again.")

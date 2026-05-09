@@ -74,7 +74,7 @@ def _apply_plotly_sort(fig, cats: list, is_horiz: bool, sort_by: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_categorical(df, x_cols=None, y_cols=None, agg="mean", sort_by=None,
-                    palette=None, top_n=None, dual_y_col=None, dual_y_agg=None,
+                    palette=None, top_n=None, dual_y_col=None,
                     direction="Vertical (Column chart)", **_):
     """
     Generate categorical bar / column charts.
@@ -101,8 +101,6 @@ def run_categorical(df, x_cols=None, y_cols=None, agg="mean", sort_by=None,
     agg_lbl  = agg.title()
     pal      = palette or COLORS
     is_horiz = "Horizontal" in str(direction)
-    sec_agg     = dual_y_agg or agg          # aggregation for secondary metric
-    sec_agg_lbl = sec_agg.title()
 
     for col in dims:
 
@@ -123,7 +121,7 @@ def run_categorical(df, x_cols=None, y_cols=None, agg="mean", sort_by=None,
                 # Y-axes: bars for the primary, a line for the secondary.
                 dual = dual_y_col
                 if dual and dual in df.columns and dual != metric:
-                    d2 = df.groupby(col)[dual].agg(sec_agg).reset_index()
+                    d2 = df.groupby(col)[dual].agg(agg).reset_index()
                     d2.columns = [col, "val2"]
                     merged = agg_df.merge(d2, on=col, how="left")
                     cats   = merged[col].tolist()
@@ -143,16 +141,16 @@ def run_categorical(df, x_cols=None, y_cols=None, agg="mean", sort_by=None,
                     ), secondary_y=False)
                     fig.add_trace(go.Scatter(
                         x=cats, y=v2,
-                        name=f"{sec_agg_lbl} {dual}",
+                        name=f"{agg_lbl} {dual}",
                         mode="lines+markers",
                         line=dict(color=pal[1], width=2),
                         marker=dict(size=8),
                     ), secondary_y=True)
                     fig.update_layout(
-                        title=f"{agg_lbl} {metric} & {sec_agg_lbl} {dual} by {col}{top_sfx}",
+                        title=f"{agg_lbl} {metric} & {dual} by {col}{top_sfx}",
                         **chart_layout())
                     fig.update_yaxes(title_text=f"{agg_lbl} {metric}", secondary_y=False)
-                    fig.update_yaxes(title_text=f"{sec_agg_lbl} {dual}",   secondary_y=True)
+                    fig.update_yaxes(title_text=f"{agg_lbl} {dual}",   secondary_y=True)
                     if is_horiz:
                         fig.update_layout(margin=dict(l=20, r=100, t=56, b=20))
                     _apply_plotly_sort(fig, cats, is_horiz, sort_by)
