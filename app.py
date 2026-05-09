@@ -40,12 +40,12 @@ CONTRIBUTING -- adding a new page
   4. Navigate to it anywhere with:
        st.session_state.page = "my_page"; st.rerun()
 """
+from dotenv import load_dotenv
+load_dotenv()
 
 import streamlit as st
 import warnings
 import json
-from dotenv import load_dotenv
-load_dotenv()
 
 warnings.filterwarnings("ignore")
 
